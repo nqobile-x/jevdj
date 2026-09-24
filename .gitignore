@@ -1,0 +1,16 @@
+.env
+__pycache__/
+node_modules/
+*.db
+.venv/
+dist/
+backend/data/
+backend/dev/demo_music/
+*.wav
+*.flac
+*.mp3
+.claude/settings.local.json
+*.part
+*.tsbuildinfo
+.pytest_cache/
+*.log

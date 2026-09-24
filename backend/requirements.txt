@@ -1,0 +1,15 @@
+fastapi>=0.115
+python-multipart>=0.0.9
+uvicorn[standard]>=0.30
+librosa>=0.10
+numpy>=1.26
+soundfile>=0.12
+av>=12  # ffmpeg decoder for AAC/Opus/mislabelled downloads
+mutagen>=1.47
+typesafe-sdk>=0.7
+groq>=0.11
+python-dotenv>=1.0
+pytest>=8
+httpx>=0.27
+# Optional DJ voice (heavy, pulls torch): pip install kokoro
+pyttsx3>=2.9  # offline fallback voice (Windows SAPI)
