@@ -1,5 +1,9 @@
 # JevDJ
 
+[![JevDJ promo - click for the full 49s video with sound](docs/media/jevdj-promo.gif)](docs/media/jevdj-promo.mp4)
+
+**[Watch the full promo (49s, with sound)](docs/media/jevdj-promo.mp4)**
+
 AI DJ with a Virtual-DJ style interface. Jev (TypeSafe System One) picks every next track and
 transition. The browser beat-matches and mixes your own music files with the Web Audio API.
 Groq writes and speaks short DJ lines, Spotify-DJ style.
