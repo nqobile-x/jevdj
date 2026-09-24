@@ -13,7 +13,7 @@ import { Mixer } from "./components/Mixer";
 import { Splitter } from "./components/Splitter";
 import { TopBar } from "./components/TopBar";
 import { useStore } from "./store";
-import type { Decision, DeckId, Health, Phase, RadioStatus, ServerEvent, TrackSummary } from "./types";
+import type { Decision, DeckId, Health, OrderShape, OrderStatus, Phase, RadioStatus, ServerEvent, TrackSummary } from "./types";
 
 const AMBER = "#ffb000";
 const CYAN = "#00e5ff";
@@ -54,6 +54,7 @@ export default function App() {
   const [broken, setBroken] = useState<{ title: string; error: string }[]>([]);
   const [sourceStatus, setSourceStatus] = useState<Record<string, { stage: string; error?: string }>>({});
   const [radio, setRadio] = useState<RadioStatus | null>(null);
+  const [order, setOrder] = useState<OrderStatus | null>(null);
   const stationKey = useRef<string>("");
   const toastTimer = useRef<number | null>(null);
   const appRef = useRef<HTMLDivElement>(null);
@@ -84,6 +85,7 @@ export default function App() {
       setPhase(h.phase);
     }).catch(() => notify("Backend not reachable on :8000 - start it with uvicorn"));
     api.decisions().then(setDecisions).catch(() => undefined);
+    api.order().then(setOrder).catch(() => undefined);
     return connectEvents((e: ServerEvent) => {
       switch (e.type) {
         case "decision":
@@ -99,6 +101,7 @@ export default function App() {
         case "scan_finished":
           setScan(null);
           loadLibrary();
+          api.order().then(setOrder).catch(() => undefined); // new tracks get a place in the plan
           api.health().then(setHealth).catch(() => undefined);
           if (!e.quiet) notify(e.error ? `Scan failed: ${e.error}` : `Scan done: ${e.analysed ?? 0} analysed, ${e.failed ?? 0} failed`);
           break;
@@ -118,6 +121,12 @@ export default function App() {
           const { type: _t, ...status } = e;
           void _t;
           setRadio(status);
+          break;
+        }
+        case "order": {
+          const { type: _t, ...status } = e;
+          void _t;
+          setOrder(status);
           break;
         }
         case "library_change":
@@ -176,6 +185,21 @@ export default function App() {
       setRadio(await api.radioStop());
       notify("AUTO now mixes from your library");
       void auto.replan();
+    }
+  };
+
+  /** SMART ORDER on/off or a new shape: arrange the set from the live track, then re-pick NEXT. */
+  const setSmartOrder = async (active: boolean, shape?: OrderShape) => {
+    try {
+      const live = autoState.live ? decks[autoState.live].track : null;
+      const st = await api.setOrder(active, shape ?? null, live?.id ?? null);
+      setOrder(st);
+      notify(active
+        ? `SMART ORDER: ${st.items.length} tracks on the ${st.shape} arc${st.smooth_pct !== null ? `, ${st.smooth_pct}% smooth mixes` : ""}`
+        : "SMART ORDER off - Jev picks track by track");
+      if (autoState.enabled) void auto.replan();
+    } catch (e) {
+      notify((e as Error).message);
     }
   };
 
@@ -290,7 +314,9 @@ export default function App() {
         level={() => engine.level()} mixProgress={autoState.mixProgress}
         lock={lock.store}
         canManualMix={!autoState.enabled && !autoState.manualMix && a.playing !== b.playing && !!a.track && !!b.track}
-        onManualMix={(s) => auto.manualMix(s)}
+        onManualMix={(s) => void auto.manualMix(s).then((used) => {
+          if (used && s === "auto") notify(`Jev picked ${used.replace("_", " ").toUpperCase()} for this mix`);
+        })}
       />
 
       <Splitter
@@ -317,6 +343,8 @@ export default function App() {
           onError={notify}
           onTab={(t) => void onLibraryTab(t)}
           onStation={(q, g) => void setStation(q, g)}
+          order={order}
+          onOrder={(on, s) => void setSmartOrder(on, s)}
         />
         <Splitter
           axis="x" cssVar="--lib-w" storageKey="jevdj.libW" target={() => bottomRef.current}

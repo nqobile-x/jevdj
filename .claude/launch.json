@@ -24,6 +24,15 @@
       "port": 8000
     },
     {
+      "name": "backend-originals",
+      "runtimeExecutable": "backend/.venv/Scripts/python.exe",
+      "runtimeArgs": [
+        "backend/dev/serve_demo.py",
+        "originals"
+      ],
+      "port": 8000
+    },
+    {
       "name": "frontend",
       "runtimeExecutable": "npm",
       "runtimeArgs": [

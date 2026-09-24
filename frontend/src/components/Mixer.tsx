@@ -113,8 +113,8 @@ function Meter({ level }: { level: () => number }) {
   return <div className="meter" ref={ref}><div className="meter-fill" /></div>;
 }
 
-const MANUAL_STYLES: [TransitionStyle, string][] = [
-  ["long_blend", "BLEND"], ["filter_fade", "FILTER"], ["quick_cut", "CUT"], ["echo_out", "ECHO"],
+const MANUAL_STYLES: [TransitionStyle | "auto", string][] = [
+  ["auto", "AUTO"], ["long_blend", "BLEND"], ["filter_fade", "FILTER"], ["quick_cut", "CUT"], ["echo_out", "ECHO"],
   ["wash_out", "WASH"], ["loop_roll", "ROLL"], ["brake", "BRAKE"],
   ["chop", "CHOP"], ["tease", "TEASE"], ["rewind", "REWIND"],
 ];
@@ -128,14 +128,14 @@ interface Props {
   mixProgress: number | null;
   lock: Store<LockState>;
   canManualMix: boolean;
-  onManualMix: (style: TransitionStyle) => void;
+  onManualMix: (style: TransitionStyle | "auto") => void;
 }
 
 export function Mixer({ a, b, crossfader, onCrossfader, level, mixProgress, lock, canManualMix, onManualMix }: Props) {
   const autoA = useAutoView(a);
   const autoB = useAutoView(b);
   const lk = useStore(lock);
-  const [style, setStyle] = useState<TransitionStyle>("long_blend");
+  const [style, setStyle] = useState<TransitionStyle | "auto">("auto");
   // While automating, the ghost crossfader shows where a DJ's hand would be.
   const automating = mixProgress != null;
   const ghost = automating ? autoB.level / Math.max(0.001, autoA.level + autoB.level) : null;
@@ -172,7 +172,8 @@ export function Mixer({ a, b, crossfader, onCrossfader, level, mixProgress, lock
           </span>
         </div>
         <div className="manual-mix">
-          <select value={style} onChange={(e) => setStyle(e.target.value as TransitionStyle)} title="Transition style">
+          <select value={style} onChange={(e) => setStyle(e.target.value as TransitionStyle | "auto")}
+            title="Transition style - AUTO lets Jev pick the move for these two tracks">
             {MANUAL_STYLES.map(([s, l]) => <option key={s} value={s}>{l}</option>)}
           </select>
           <button className="btn small go" disabled={!canManualMix} onClick={() => onManualMix(style)}

@@ -1,5 +1,5 @@
 import type {
-  Decision, Flair, Health, LearnedStyle, MixStyle, NextResponse, RadioStatus, ServerEvent, TrackDetail, TrackSummary, TransitionPlan, Vibe, VoiceLine,
+  Decision, Flair, Health, LearnedStyle, MixStyle, NextResponse, OrderShape, OrderStatus, RadioStatus, ServerEvent, TrackDetail, TrackSummary, TransitionPlan, Vibe, VoiceLine,
 } from "./types";
 
 export const API = "/api";
@@ -86,6 +86,9 @@ export const api = {
   radioStart: (query: string | null, genre: string | null = null) => post<RadioStatus>("/radio/start", { query, genre }),
   radioStop: () => post<RadioStatus>("/radio/stop"),
   setFlair: (flair: Flair) => post("/set/flair", { flair }),
+  order: () => req<OrderStatus>("/set/order"),
+  setOrder: (active: boolean, shape: OrderShape | null, current_id: number | null) =>
+    post<OrderStatus>("/set/order", { active, shape, current_id }),
   feedback: (value: 1 | -1, style: string, note?: string) =>
     post<{ learned: Record<string, LearnedStyle> }>("/feedback", { kind: "transition", value, style, note }),
   learning: () => req<{ styles: Record<string, LearnedStyle> }>("/learning"),

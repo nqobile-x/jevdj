@@ -2,7 +2,9 @@
 
 [![JevDJ promo - click for the full 49s video with sound](docs/media/jevdj-promo.gif)](docs/media/jevdj-promo.mp4)
 
-**[Watch the full promo (49s, with sound)](docs/media/jevdj-promo.mp4)**
+**[Watch the full promo (49s, with sound)](docs/media/jevdj-promo.mp4)** ·
+**[Live demo for social (38s, vertical)](docs/media/jevdj-social.mp4)**, a real screen recording of
+the app arranging and mixing a set (music: JevDJ Originals, royalty-free)
 
 AI DJ with a Virtual-DJ style interface. Jev (TypeSafe System One) picks every next track and
 transition. The browser beat-matches and mixes your own music files with the Web Audio API.
@@ -48,8 +50,11 @@ cd backend
 
 ## Try it without music
 
-`backend/dev/make_demo_tracks.py` synthesises 12 tracks with known BPM and key.
-`backend/dev/serve_demo.py` runs the backend against them with a separate database.
+`backend/dev/make_originals.py` synthesises **JevDJ Originals**: 8 royalty-free amapiano / afro house
+tracks (110-120 BPM, mellow to peak-time) that are safe for videos and posts.
+`python dev/serve_demo.py originals` runs the backend against them with a separate database.
+`backend/dev/make_demo_tracks.py` synthesises 12 test-tone tracks with known BPM and key
+(`python dev/serve_demo.py` serves those).
 `backend/dev/jev_smoke.py` asks the real Jev one of each question type.
 
 ## Controls
@@ -58,13 +63,27 @@ cd backend
 |---|---|
 | Top bar | AUTO, vibe (auto / warm-up / build / peak / cool-down), VOICE, REC (24-bit WAV), set export TXT / JSON |
 | Decks | CUE, PLAY, SYNC, pitch (+-8%), drag a track onto a deck, click a waveform to seek |
-| Mixer | GAIN, HI / MID / LOW (full kill), FILTER (left low-pass, right high-pass), channel faders, crossfader. Double-click resets |
+| Mixer | GAIN, HI / MID / LOW (full kill), FILTER (left low-pass, right high-pass), channel faders, crossfader. Double-click resets. MIX ▶ mixes now: pick a move or AUTO (Jev picks) |
+| Library | SMART ORDER arranges the whole set (JOURNEY / BUILD / PEAK TIME); the table becomes the queue with an energy arc strip |
 | AI panel | VETO, PICK ANOTHER, MIX NOW, SWITCH IT UP, live decision log with confidence |
 | Keys | Space play/pause live deck, Q / W cue deck A / B |
 
 Mascot: drop your art at `frontend/public/mascot.png` (or .svg / .gif / .webp) and it replaces
 the built-in Jev in the booth. It bobs on the beat, thinks while Jev chooses, works the decks
 during a mix and talks when the voice plays.
+
+## SMART ORDER
+
+One tap arranges the whole pool (your library, or the Audius station) into a set:
+
+- **Energy arc**: every slot has a target energy. JOURNEY warms up, peaks around 70% and brings it
+  home; BUILD climbs all the way; PEAK TIME puts the hottest block first. Targets are percentiles
+  of *your* pool, so the high-energy tracks cluster together whatever the library sounds like.
+- **Smooth neighbours**: each pair is scored on Camelot key and tempo; a greedy chain plus a local
+  search (segment reversals and moves) minimises rough mixes (`backend/app/brain/order.py`).
+- AUTO then plays the order; the set phase follows the arc. Jev still picks every transition and
+  the pre-listen still checks every mix. SWITCH IT UP or a manual pick re-arranges the rest of the
+  set from what is playing; new tracks get a place automatically.
 
 ## How the brain decides
 

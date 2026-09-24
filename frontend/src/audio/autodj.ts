@@ -130,13 +130,27 @@ export class AutoDJ {
     }
   }
 
-  /** MIX button (auto off): blend from the playing deck into the other one now, in the chosen style. */
-  manualMix(style: TransitionStyle): void {
+  /** MIX button (auto off): blend from the playing deck into the other one now, in the chosen style.
+   *  "auto": Jev picks the move for this pair (same brain as AUTO mode). Returns the style used. */
+  async manualMix(choice: TransitionStyle | "auto"): Promise<TransitionStyle | null> {
     const out = this.decks.A.playing && !this.decks.B.playing ? this.decks.A
       : this.decks.B.playing && !this.decks.A.playing ? this.decks.B : null;
-    if (!out?.track || this.s.manualMix || this.s.enabled) return;
+    if (!out?.track || this.s.manualMix || this.s.enabled) return null;
     const inc = out === this.decks.A ? this.decks.B : this.decks.A;
-    if (!inc.track) return;
+    if (!inc.track) return null;
+    let style: TransitionStyle = choice === "auto" ? "long_blend" : choice;
+    if (choice === "auto") {
+      this.store.set({ manualMix: true }); // lock the button while Jev thinks
+      try {
+        style = (await api.transition(out.track.id, inc.track.id, null)).style;
+      } catch {
+        style = "long_blend"; // brain offline: a safe blend
+      }
+      if (!out.playing || !inc.track) {
+        this.store.set({ manualMix: false });
+        return null;
+      }
+    }
     const mixOut = out.nextDownbeat(out.position(this.engine.now + 0.6));
     const mixIn = inc.nextDownbeat(Math.max(0, inc.position() - 0.05));
     const sched = scheduleTransition(this.engine, out, inc, style, STYLE_BARS[style], mixOut, mixIn);
@@ -150,8 +164,10 @@ export class AutoDJ {
       out.stop();
       out.resetAutomation();
       this.store.set({ manualMix: false, scheduled: null, mixProgress: null });
-      void api.override("manual_mix", inc.track?.id ?? null, `manual ${style}`).catch(() => undefined);
+      void api.override("manual_mix", inc.track?.id ?? null, `manual ${choice === "auto" ? `auto: ${style}` : style}`)
+        .catch(() => undefined);
     }, Math.max(0, (sched.end - this.engine.now) * 1000) + 60);
+    return style;
   }
 
   async setVibe(vibe: Vibe): Promise<void> {

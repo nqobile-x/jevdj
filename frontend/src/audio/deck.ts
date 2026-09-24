@@ -74,6 +74,8 @@ export class Deck {
   readonly fader: GainNode;
   readonly xfade: GainNode;
 
+  private loadToken = 0;
+
   constructor(readonly id: DeckId, private engine: Engine) {
     const ctx = engine.ctx;
     this.srcGain = new GainNode(ctx, { gain: 1 });
@@ -193,6 +195,7 @@ export class Deck {
 
   async load(trackId: number): Promise<TrackDetail> {
     this.stop();
+    const token = ++this.loadToken;
     this.store.set({ loading: true, error: null });
     try {
       const [detail, buf] = await Promise.all([
@@ -202,6 +205,8 @@ export class Deck {
           return this.engine.ctx.decodeAudioData(await r.arrayBuffer());
         }),
       ]);
+      // A newer load started meanwhile (the next pick changed): this one must not win the deck.
+      if (token !== this.loadToken) throw new Error("load superseded");
       this.buffer = buf;
       this.resetAutomation();
       this.anchor(this.engine.now, detail.first_downbeat || 0, 1, true);
@@ -211,7 +216,7 @@ export class Deck {
       });
       return detail;
     } catch (e) {
-      this.store.set({ loading: false, error: (e as Error).message });
+      if (token === this.loadToken) this.store.set({ loading: false, error: (e as Error).message });
       throw e;
     }
   }

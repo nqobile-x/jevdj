@@ -28,6 +28,7 @@ from app.analysis.audio_io import NATIVE, NotAudioError, check_audio, sniff, to_
 from app.analysis.watcher import LibraryWatcher, snapshot
 from app.sources import audius
 from app.analysis.scanner import find_audio, scan_library
+from app.brain import order as smart
 from app.brain import rules
 from app.brain.cards import track_card
 from app.brain.jev import JevBrain
@@ -142,6 +143,12 @@ class SourceAddBody(BaseModel):
 class RadioBody(BaseModel):
     query: str | None = None  # None = trending
     genre: str | None = None
+
+
+class OrderBody(BaseModel):
+    active: bool = True
+    shape: str | None = None  # journey | build | peak
+    current_id: int | None = None
 
 
 class GridBody(BaseModel):
@@ -380,11 +387,156 @@ def create_app(settings: Settings = default_settings, jev_client: Any = None) ->
         finally:
             audius_busy.discard(tid)
 
+    # ------------------------------------------------------------ SMART ORDER
+
+    order: dict[str, Any] = {"active": False, "shape": "journey", "ids": [], "scope": "library", "since": 0,
+                             "total": 0, "smooth_pct": None}
+    order_lock = threading.RLock()
+
+    def order_pool() -> tuple[list[dict[str, Any]], str]:
+        library = db.get_tracks_full()
+        if radio["active"]:
+            pool = radio_pool()
+            return [t for t in library if t["id"] in pool], "audius"
+        return library, "library"
+
+    def order_played() -> list[int]:
+        """Tracks played since SMART ORDER was switched on (or since the last lap)."""
+        if state.set_id is None:
+            return []
+        return [h["track_id"] for h in db.history(state.set_id) if h["id"] > order["since"]]
+
+    def order_start_mark(current_id: int | None) -> int:
+        """History id the plan counts plays after. The live track counts as played: it is on already."""
+        h = db.history(state.set_id) if state.set_id is not None else []
+        if not h:
+            return 0
+        if current_id is not None and h[-1]["track_id"] == current_id:
+            return h[-1]["id"] - 1
+        return h[-1]["id"]
+
+    def order_rebuild(current: dict[str, Any] | None) -> None:
+        """Arrange everything not yet played into the best set, continuing from the current track."""
+        with order_lock:
+            if current is None and state.set_id is not None:
+                last = db.recent_track_ids(state.set_id, 1)
+                current = db.get_track(last[0]) if last else None
+            pool, scope = order_pool()
+            played = order_played()
+            cur_id = current["id"] if current else None
+            head = [i for i in dict.fromkeys(played) if i != cur_id] + ([cur_id] if cur_id else [])
+            remaining = [t for t in pool if t["id"] not in set(head)]
+            total = len(head) + len(remaining)
+            if scope == "audius":
+                total = max(total, len(radio["ids"]))
+            planned = smart.smart_order(remaining, order["shape"], current, offset=len(head), total=total,
+                                        taste=db.taste())
+            info = smart.describe(planned, current)
+            order.update(ids=head + [t["id"] for t in planned], scope=scope, total=total,
+                         smooth_pct=info["smooth_pct"])
+        bus.publish(order_status())
+
+    def order_status() -> dict[str, Any]:
+        tracks = {t["id"]: t for t in db.get_tracks_full()}
+        played = set(order_played())
+        items, prev = [], None
+        for pos, i in enumerate(order["ids"]):
+            t = tracks.get(i)
+            if not t:
+                continue
+            items.append({"id": i, "pos": pos + 1, "energy": round(t.get("energy") or 0.5, 3),
+                          "played": i in played, "smooth": rules.transition_smoothness(prev, t) if prev else None})
+            prev = t
+        return {"type": "order", "active": order["active"], "shape": order["shape"], "scope": order["scope"],
+                "total": order["total"], "smooth_pct": order["smooth_pct"],
+                "items": items if order["active"] else []}
+
+    def order_stale(pool: list[dict[str, Any]], scope: str) -> bool:
+        known = set(order["ids"])
+        return scope != order["scope"] or any(t["id"] not in known for t in pool)
+
+    def order_pick(current: dict[str, Any] | None, exclude: list[int]) -> dict[str, Any] | None:
+        """Next track from the SMART ORDER (None = fall back to the normal brain)."""
+        pool, scope = order_pool()
+        pool_ids = {t["id"] for t in pool}
+        cur_id = current["id"] if current else None
+
+        def upcoming() -> list[int]:
+            played = set(order_played())
+            return [i for i in order["ids"]
+                    if i not in played and i != cur_id and i not in exclude and i in pool_ids]
+
+        up = upcoming()
+        # Rebuild when the pool changed or the live track is not where the plan expected it
+        # (a manual pick): the rest of the set is re-arranged to flow from what is playing.
+        expected_prev = None
+        if up:
+            k = order["ids"].index(up[0])
+            expected_prev = order["ids"][k - 1] if k > 0 else None
+        if order_stale(pool, scope) or not up or (cur_id is not None and expected_prev != cur_id):
+            if not up and order["ids"]:
+                order["since"] = order_start_mark(cur_id)  # every track played: start a new lap
+            order_rebuild(current)
+            up = upcoming()
+        if not up:
+            return None
+        nxt = next(t for t in pool if t["id"] == up[0])
+        pos = order["ids"].index(nxt["id"])
+        total = max(order["total"], len(order["ids"]))
+        phase = smart.phase_at(order["shape"], pos / max(total - 1, 1))
+        if phase != state.phase:
+            state.phase = phase
+            bus.publish({"type": "phase", "phase": phase, "vibe": state.vibe, "source": "order"})
+        smooth = rules.transition_smoothness(current, nxt) if current else None
+        feel = "opener" if smooth is None else {0: "rough", 1: "okay", 2: "smooth", 3: "seamless"}[smooth]
+        reason = f"smart order {pos + 1}/{total} ({order['shape']}, {feel}): {rules.reason_line(current, nxt)}"
+        d = log_decision({"set_id": state.set_id, "kind": "next_track", "source": "order",
+                          "question": "next track in the SMART ORDER",
+                          "answer": f"{nxt.get('artist')} - {nxt.get('title')}", "reason": reason})
+        bus.publish(order_status())
+        return {
+            "track": {k: v for k, v in nxt.items() if k not in ("energy_bars", "vocal_bars", "downbeats")},
+            "source": "order", "confidence": None, "reason": reason, "fallback": None,
+            "decision_ids": [d["id"]], "phase": state.phase, "candidates": len(up),
+        }
+
+    @app.get("/set/order")
+    def set_order_get() -> dict[str, Any]:
+        if order["active"]:
+            pool, scope = order_pool()
+            if order_stale(pool, scope):
+                order_rebuild(None)
+        return order_status()
+
+    @app.post("/set/order")
+    def set_order(body: OrderBody) -> dict[str, Any]:
+        ensure_set()
+        if body.shape is not None:
+            if body.shape not in smart.SHAPES:
+                raise HTTPException(400, f"shape must be one of {smart.SHAPES}")
+            order["shape"] = body.shape
+        if not body.active:
+            order.update(active=False, ids=[])
+            status = order_status()
+            bus.publish(status)
+            return status
+        if not order["active"]:  # switching on: count plays from now; a new shape keeps the set's history
+            order.update(active=True, since=order_start_mark(body.current_id))
+        current = db.get_track(body.current_id) if body.current_id else None
+        order_rebuild(current)
+        pct = order["smooth_pct"]
+        log_decision({"set_id": state.set_id, "kind": "order", "source": "rules", "question": "arrange the set",
+                      "answer": f"SMART ORDER: {order['shape']}",
+                      "reason": f"{len(order['ids'])} tracks from {order['scope']} arranged on the {order['shape']} "
+                                f"energy arc, {pct if pct is not None else '-'}% smooth transitions"})
+        return order_status()
+
     # ------------------------------------------------------------ Audius station (auto mix from Audius)
 
     radio: dict[str, Any] = {"active": False, "query": None, "genre": None, "ids": [], "failed": set()}
     radio_lock = threading.Lock()
     RADIO_AHEAD = 3  # keep this many analysed, unplayed station tracks ready
+    RADIO_AHEAD_ORDERED = 6  # SMART ORDER gets more tracks to arrange
 
     def radio_pool() -> set[int]:
         have = db.source_ids("audius")
@@ -403,7 +555,7 @@ def create_app(settings: Settings = default_settings, jev_client: Any = None) ->
         try:
             while radio["active"]:
                 status = radio_status()
-                if status["ready"] >= RADIO_AHEAD:
+                if status["ready"] >= (RADIO_AHEAD_ORDERED if order["active"] else RADIO_AHEAD):
                     break
                 have = db.source_ids("audius")
                 todo = [s for s in radio["ids"] if s not in have and s not in radio["failed"] and s not in audius_busy]
@@ -415,6 +567,8 @@ def create_app(settings: Settings = default_settings, jev_client: Any = None) ->
                 if radio["ids"] != ids_before:  # station changed meanwhile
                     continue
                 bus.publish(radio_status())
+                if order["active"]:
+                    order_rebuild(None)
         finally:
             radio_lock.release()
             bus.publish(radio_status())
@@ -434,6 +588,8 @@ def create_app(settings: Settings = default_settings, jev_client: Any = None) ->
                       "answer": f"Audius: {body.query or 'trending ' + (body.genre or '')}".strip(),
                       "reason": f"{len(results)} full-length tracks in the station"})
         threading.Thread(target=radio_fill, daemon=True, name="radio-fill").start()
+        if order["active"]:
+            order_rebuild(None)
         status = radio_status()
         bus.publish(status)
         return status
@@ -441,6 +597,8 @@ def create_app(settings: Settings = default_settings, jev_client: Any = None) ->
     @app.post("/radio/stop")
     def radio_stop() -> dict[str, Any]:
         radio.update(active=False)
+        if order["active"]:
+            order_rebuild(None)
         status = radio_status()
         bus.publish(status)
         return status
@@ -549,6 +707,11 @@ def create_app(settings: Settings = default_settings, jev_client: Any = None) ->
             res = await brain.choose_phase(state.phase, state.played, last, set_id)
             state.phase = res["phase"]
             bus.publish({"type": "phase", "phase": state.phase, "vibe": state.vibe, "source": res["source"]})
+
+        if order["active"] and not body.switch:
+            picked = order_pick(current, body.exclude)
+            if picked:
+                return picked
 
         recent = list(dict.fromkeys(body.history[-settings.recent_block:] + db.recent_track_ids(set_id, settings.recent_block)))
         if body.switch and current:

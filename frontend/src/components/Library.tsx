@@ -1,7 +1,8 @@
 import { useMemo, useRef, useState } from "react";
-import type { TrackSummary } from "../types";
+import type { OrderShape, OrderStatus, TrackSummary } from "../types";
 import { AudiusPanel, type SourceStatus } from "./AudiusPanel";
 import { fmtTime } from "./DeckView";
+import { OrderStrip } from "./OrderStrip";
 
 interface Props {
   tracks: TrackSummary[];
@@ -20,6 +21,8 @@ interface Props {
   onError: (msg: string) => void;
   onTab: (tab: "mine" | "audius") => void;
   onStation: (query: string | null, genre: string | null) => void;
+  order: OrderStatus | null;
+  onOrder: (active: boolean, shape?: OrderShape) => void;
 }
 
 type SortKey = "artist" | "title" | "bpm" | "camelot" | "energy" | "duration" | "genre";
@@ -40,6 +43,9 @@ export function Library(p: Props) {
   const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>({ key: "artist", dir: 1 });
   const [matchOnly, setMatchOnly] = useState(false);
   const [tab, setTab] = useState<"mine" | "audius">("mine");
+  const ordered = !!p.order?.active;
+  const planPos = useMemo(() => new Map((p.order?.active ? p.order.items : []).map((i) => [i.id, i])), [p.order]);
+  const byId = useMemo(() => new Map(tracks.map((t) => [t.id, t])), [tracks]);
 
   const rows = useMemo(() => {
     const needle = q.trim().toLowerCase();
@@ -48,13 +54,18 @@ export function Library(p: Props) {
     if (matchOnly && refCamelot && refBpm) {
       list = list.filter((t) => camelotDist(refCamelot, t.camelot) <= 1 && Math.abs(t.bpm / refBpm - 1) <= 0.08);
     }
+    if (ordered) {
+      // SMART ORDER: the table is the queue; tracks outside the plan go last.
+      const pos = (t: TrackSummary) => planPos.get(t.id)?.pos ?? 1e6;
+      return [...list].sort((a, b) => pos(a) - pos(b));
+    }
     return [...list].sort((a, b) => {
       const va = a[sort.key] ?? "";
       const vb = b[sort.key] ?? "";
       if (sort.key === "camelot") return (parseInt(va as string) - parseInt(vb as string) || String(va).localeCompare(String(vb))) * sort.dir;
       return (typeof va === "number" ? (va as number) - (vb as number) : String(va).localeCompare(String(vb))) * sort.dir;
     });
-  }, [tracks, q, sort, matchOnly, refCamelot, refBpm]);
+  }, [tracks, q, sort, matchOnly, refCamelot, refBpm, ordered, planPos]);
 
   const th = (key: SortKey, label: string, cls = "") => (
     <th className={cls} onClick={() => setSort((s) => ({ key, dir: s.key === key ? (-s.dir as 1 | -1) : 1 }))}>
@@ -95,6 +106,10 @@ export function Library(p: Props) {
           <button className={`tab ${tab === "audius" ? "on" : ""}`} onClick={() => { setTab("audius"); p.onTab("audius"); }}
             title="AUTO mixes Audius tracks from your search (free, legal, artist-uploaded)">AUDIUS</button>
         </span>
+        <button className={`btn small order-btn ${ordered ? "on" : ""}`} onClick={() => p.onOrder(!ordered)}
+          title="Arrange the whole set: energy arc + smooth key/tempo neighbours. AUTO plays it in order">
+          {ordered ? "● SMART ORDER" : "SMART ORDER"}
+        </button>
         {tab === "audius" ? <span className="dim">AUTO mixes from this search - pick a genre or search an artist</span> : <>
         <span className="mono dim">{rows.length}/{tracks.length}</span>
         <input className="search" placeholder="search artist, title, key, bpm..." value={q} onChange={(e) => setQ(e.target.value)} />
@@ -117,6 +132,9 @@ export function Library(p: Props) {
         )}
         </>}
       </header>
+      {ordered && p.order && (
+        <OrderStrip order={p.order} tracks={byId} playingIds={playingIds} onShape={(s) => p.onOrder(true, s)} />
+      )}
       {tab === "audius" && <AudiusPanel status={p.sourceStatus} onLoad={onLoad} onError={p.onError} onStation={p.onStation} refCamelot={refCamelot} />}
       {tab === "mine" && scan?.running && (
         <div className="scanbar"><div style={{ width: `${scan.total ? (scan.done / scan.total) * 100 : 0}%` }} /><span>{scan.current}</span></div>
@@ -131,16 +149,17 @@ export function Library(p: Props) {
         ) : (
           <table>
             <thead>
-              <tr>{th("artist", "ARTIST")}{th("title", "TITLE")}{th("bpm", "BPM", "num")}{th("camelot", "KEY", "num")}{th("energy", "ENERGY", "num")}{th("duration", "TIME", "num")}{th("genre", "GENRE")}</tr>
+              <tr>{ordered && <th className="num">#</th>}{th("artist", "ARTIST")}{th("title", "TITLE")}{th("bpm", "BPM", "num")}{th("camelot", "KEY", "num")}{th("energy", "ENERGY", "num")}{th("duration", "TIME", "num")}{th("genre", "GENRE")}</tr>
             </thead>
             <tbody>
               {rows.map((t) => {
                 const kd = refCamelot ? camelotDist(refCamelot, t.camelot) : null;
+                const op = planPos.get(t.id);
                 return (
                   <tr
                     key={t.id}
                     draggable
-                    className={playingIds.includes(t.id) ? "playing" : ""}
+                    className={`${playingIds.includes(t.id) ? "playing" : ""} ${op?.played && !playingIds.includes(t.id) ? "done" : ""}`}
                     onDragStart={(e) => {
                       e.dataTransfer.setData("text/jevdj-track", String(t.id));
                       e.dataTransfer.effectAllowed = "copy";
@@ -148,6 +167,11 @@ export function Library(p: Props) {
                     onDoubleClick={() => onLoad(t.id)}
                     title="Drag to a deck, or double-click to load the idle deck"
                   >
+                    {ordered && (
+                      <td className="num mono dim">
+                        {op ? <>{op.pos}<span className={`sdot s${op.smooth ?? "x"}`} /></> : "-"}
+                      </td>
+                    )}
                     <td>{t.artist}</td>
                     <td className="t-title">
                       {t.title}

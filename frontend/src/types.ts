@@ -36,7 +36,7 @@ export interface TrackDetail extends TrackSummary {
 
 export interface NextResponse {
   track: TrackSummary;
-  source: "jev" | "rules";
+  source: "jev" | "rules" | "order";
   confidence: number | null;
   reason: string;
   fallback: string | null;
@@ -74,7 +74,7 @@ export interface Decision {
   id: number;
   ts: number;
   kind: string;
-  source: "jev" | "rules" | "user" | "groq" | "template";
+  source: "jev" | "rules" | "user" | "groq" | "template" | "order";
   question: string | null;
   options: unknown;
   answer: unknown;
@@ -108,7 +108,27 @@ export type ServerEvent =
   | { type: "scan_reason"; reason: string }
   | { type: "mix_style"; mix_style: MixStyle }
   | { type: "source_progress"; source: string; id: string; stage: string; title?: string; track_id?: number; error?: string }
-  | ({ type: "radio" } & RadioStatus);
+  | ({ type: "radio" } & RadioStatus)
+  | ({ type: "order" } & OrderStatus);
+
+export type OrderShape = "journey" | "build" | "peak";
+
+export interface OrderItem {
+  id: number;
+  pos: number;
+  energy: number;
+  played: boolean;
+  smooth: 0 | 1 | 2 | 3 | null; // how smooth the mix INTO this track is
+}
+
+export interface OrderStatus {
+  active: boolean;
+  shape: OrderShape;
+  scope: "library" | "audius";
+  total: number;
+  smooth_pct: number | null;
+  items: OrderItem[];
+}
 
 export interface RadioStatus {
   active: boolean;

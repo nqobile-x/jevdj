@@ -423,3 +423,30 @@ body.resizing, body.resizing * { cursor: grabbing !important; user-select: none;
   .bottom .splitter-x { display: none; }
 }
 .ebar.unknown { background: repeating-linear-gradient(90deg, var(--bg3) 0 3px, transparent 3px 6px); opacity: 0.6; }
+
+/* ---------------------------------------------------------------- SMART ORDER */
+.src-order { color: var(--yellow); border-color: #ffe14d66; }
+.order-btn.on { color: var(--yellow); border-color: #ffe14d99; box-shadow: 0 0 10px #ffe14d33; }
+.order-strip { border-bottom: 1px solid var(--line); padding: 6px 10px 8px; background: var(--bg1); }
+.order-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 10px; margin-bottom: 6px; }
+.order-title { font: 700 10px var(--label); letter-spacing: 0.14em; color: var(--yellow); }
+.order-head b.ok { color: var(--green); font-weight: 700; }
+.seg { display: inline-flex; border: 1px solid var(--line2); border-radius: 3px; overflow: hidden; }
+.seg-btn { background: transparent; border: 0; color: var(--dim); font: 600 9px var(--label); letter-spacing: 0.1em; padding: 3px 7px; cursor: pointer; }
+.seg-btn + .seg-btn { border-left: 1px solid var(--line2); }
+.seg-btn.on { background: #ffe14d1f; color: var(--yellow); }
+.order-empty { font-size: 11px; padding: 6px 0; }
+.order-bars { display: flex; align-items: flex-end; gap: 3px; height: 46px; }
+.obar { flex: 1; min-width: 4px; max-width: 26px; height: 100%; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; gap: 3px; cursor: default; }
+.obar i { display: block; width: 100%; border-radius: 2px 2px 0 0; background: linear-gradient(0deg, var(--cyan), var(--amber)); opacity: 0.85; }
+.obar.played i { opacity: 0.22; }
+.obar.live i { opacity: 1; box-shadow: 0 0 10px var(--amber); outline: 1px solid #fff; }
+.obar.next i { opacity: 1; animation: obar-pulse 1s ease-in-out infinite; }
+@keyframes obar-pulse { 50% { box-shadow: 0 0 12px var(--green); } }
+.sdot { display: inline-block; width: 5px; height: 5px; border-radius: 50%; background: var(--line2); flex: none; }
+td .sdot { margin-left: 5px; vertical-align: middle; }
+.sdot.s3 { background: var(--green); }
+.sdot.s2 { background: #8be38b; }
+.sdot.s1 { background: var(--yellow); }
+.sdot.s0 { background: var(--red); }
+tbody tr.done td { opacity: 0.4; }
