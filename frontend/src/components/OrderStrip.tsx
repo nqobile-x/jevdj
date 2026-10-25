@@ -30,12 +30,12 @@ export function OrderStrip({ order, tracks, playingIds, onShape }: Props) {
           ))}
         </span>
         <span className="mono dim">
-          {items.length} tracks · {order.scope === "audius" ? "Audius station" : "your library"}
+          {items.length} tracks · {order.scope === "stream" ? "YouTube/TikTok station" : order.scope === "audius" ? "Audius station" : "your library"}
           {order.smooth_pct !== null && <> · <b className="ok">{order.smooth_pct}%</b> smooth mixes</>}
         </span>
       </div>
       {items.length === 0 ? (
-        <div className="dim order-empty">{order.scope === "audius" ? "Preparing station tracks to arrange..." : "No analysed tracks to arrange yet"}</div>
+        <div className="dim order-empty">{order.scope !== "library" ? "Preparing station tracks to arrange..." : "No analysed tracks to arrange yet"}</div>
       ) : (
         <div className="order-bars">
           {items.map((i) => {

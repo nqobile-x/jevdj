@@ -29,6 +29,11 @@ STYLE_CRITERIA = {
     "chop": "Chop: trade bars back and forth (2, 2, 1, 1, 1, 1) between the tracks, landing on the new drop. Human, hip hop/amapiano style; works even when keys clash.",
     "tease": "Tease: short stabs of the new track's drop over the outgoing hook, building up, then the full switch on the drop. Best when energy is rising.",
     "rewind": "Rewind: quick spin-back on the outgoing, then slam the new track in on its drop. Big crowd moment, use sparingly.",
+    "log_drum_swap": "Log Drum Swap: 16-bar signature SA amapiano/afro-house move. Teases incoming shakers & highs, cuts both sub-bass lines for 1 bar of tension at bar 7, then slams the new log drum in on bar 8.",
+    "word_play": "Word Play: 8-bar vocal phrase handoff. Isolates the outgoing vocal hook (cuts lows/highs), catches the last phrase in a rhythmic 1/4-beat echo loop, then drops the new track cleanly on the one.",
+    "double_drop": "Double Drop: 16-bar festival peak-hour blend where both drops play together with complementary EQ (incoming sub-bass + outgoing mid/high hook) before handing over at bar 12.",
+    "siren_spin": "Siren Spin: 2-bar high-energy sound-system reload. Riser + dub echo + quick spin-back on the outgoing, slamming the new track's drop on beat 1.",
+    "stem_mashup": "Stem Mashup (Acapella + Instrumental): 16-bar live mashup that isolates the outgoing song's vocal hook (cutting its sub-bass & highs) and rides it over the incoming song's instrumental groove and bassline.",
 }
 PHASE_CRITERIA = [
     "warm-up: relaxed, groovy, lower energy",
@@ -104,8 +109,15 @@ class JevBrain:
             "user_vibe": context.get("vibe"),
             "last_tracks": context.get("last_cards", []),
             "recent_user_overrides": context.get("overrides", []),
-            "dj_taste": "amapiano, afro house, deep house, hip hop; smooth harmonic mixing",
+            "dj_taste": (
+                "World-class universal resident DJ (amapiano, private school piano, sgija, 3-step, afro house, gqom, "
+                "afrobeats, deep house, tech house, hip hop, drill, r&b, pop, electronic). Adapt seamlessly to ANY "
+                "music the listener plays: prioritise harmonic Camelot key flow (0-1 step), tight BPM lock (including "
+                "half/double-time bridges for hip-hop/d&b), vocal-vs-instrumental complementarity (pair vocal-led tracks "
+                "with groove/instrumental tracks for clean stem mashups), and smooth energy progression."
+            ),
             "listener_taste": context.get("taste_text") or "no listening history yet",
+            "trained_crate_profile": context.get("crate_profile") or "universal library & stream station",
         }
         ids: list[int] = []
         fallback_reason = None
@@ -215,8 +227,13 @@ class JevBrain:
             "last_transition_styles": recent_styles or [],
             "flair": flair,
             "listener_ratings_of_moves": feedback,
-            "creative_brief": ("Mix like a creative club DJ: vary the moves, avoid repeating the last style, "
-                               f"keep the energy right for the {phase} phase. Mix style: {mix_style}."),
+            "creative_brief": (
+                f"Mix like a world-class local & international resident DJ across any genre: vary the moves (never repeat "
+                f"the last 2 styles), use stem_mashup when the outgoing track has a strong vocal hook and the incoming "
+                f"track has a clean instrumental/groove intro in a compatible key, use log_drum_swap for amapiano/3-step/afro-house "
+                f"bassline handoffs, word_play when leaving a hip-hop/r&b/vocal hook, double_drop at peak energy when keys match, "
+                f"and keep the energy locked for the {phase} phase. Mix style: {mix_style}."
+            ),
         }
         style_q = "Which transition style fits this mix best?"
         vocal_q = "Is the outgoing track in a vocal section at the planned mix point?"

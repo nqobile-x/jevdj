@@ -32,6 +32,7 @@ export interface DeckState {
   loadedAt: number;
   loop: { start: number; end: number } | null;
   fx: { echo: boolean; wash: boolean; roll: boolean };
+  stem?: "full" | "vocal" | "inst";
 }
 
 export function eqToDb(v: number): number {
@@ -357,6 +358,32 @@ export class Deck {
   setVolume(v: number): void {
     this.fader.gain.setTargetAtTime(v * v, this.engine.now, 0.01);
     this.store.set({ volume: v });
+  }
+
+  /**
+   * Live Stem / Acapella / Instrumental Mode (works on Local, Audius, YouTube & TikTok tracks):
+   * - "vocal": Isolates the vocal hook (cuts sub-bass -40 dB, 320 Hz HPF, boosts vocal presence)
+   * - "inst": Carves out the vocal pocket (-0.68 mid EQ @ 1 kHz, +0.25 sub-bass) so another song's vocal sits cleanly on top
+   * - "full": Normal full-spectrum playback
+   */
+  setStemMode(mode: "full" | "vocal" | "inst"): void {
+    if (mode === "vocal") {
+      this.setEq("low", -1);
+      this.setEq("mid", 0.45);
+      this.setEq("high", -0.35);
+      this.setFilter(0.45);
+    } else if (mode === "inst") {
+      this.setEq("low", 0.25);
+      this.setEq("mid", -0.68);
+      this.setEq("high", 0.1);
+      this.setFilter(0);
+    } else {
+      this.setEq("low", 0);
+      this.setEq("mid", 0);
+      this.setEq("high", 0);
+      this.setFilter(0);
+    }
+    this.store.set({ stem: mode });
   }
 
   // ---------------------------------------------------------------- loops

@@ -5,9 +5,10 @@ import { BeatLock } from "./audio/beatlock";
 import { Deck } from "./audio/deck";
 import { Engine } from "./audio/engine";
 import { MixRecorder } from "./audio/recorder";
+import { SOUND_PADS, Soundboard } from "./audio/soundboard";
 import { AIPanel } from "./components/AIPanel";
 import { DeckView } from "./components/DeckView";
-import { Library } from "./components/Library";
+import { Library, type LibraryTab } from "./components/Library";
 import { Mascot, type MascotMood } from "./components/Mascot";
 import { Mixer } from "./components/Mixer";
 import { Splitter } from "./components/Splitter";
@@ -23,19 +24,20 @@ let rigSingleton: ReturnType<typeof createRig> | null = null;
 function createRig() {
   const engine = new Engine(44100);
   const decks: Record<DeckId, Deck> = { A: new Deck("A", engine), B: new Deck("B", engine) };
-  const auto = new AutoDJ(engine, decks);
+  const soundboard = new Soundboard(engine, decks);
+  const auto = new AutoDJ(engine, decks, soundboard);
   const recorder = new MixRecorder(engine);
   const lock = new BeatLock(engine, decks);
   // The live (outgoing) deck leads; the other one follows its kicks.
   lock.leader = () => auto.store.get().live ?? (decks.A.playing && !decks.B.playing ? "A" : decks.B.playing && !decks.A.playing ? "B" : "A");
-  const rig = { engine, decks, auto, recorder, lock };
+  const rig = { engine, decks, auto, recorder, lock, soundboard };
   if (import.meta.env.DEV) (window as unknown as { __jevdj: typeof rig }).__jevdj = rig; // dev-only test hook
   return rig;
 }
 
 export default function App() {
   const rig = useMemo(() => (rigSingleton ??= createRig()), []);
-  const { engine, decks, auto, recorder, lock } = rig;
+  const { engine, decks, auto, recorder, lock, soundboard } = rig;
   const autoState = useStore(auto.store);
   const a = useStore(decks.A.store);
   const b = useStore(decks.B.store);
@@ -52,7 +54,7 @@ export default function App() {
   const [autoMatch, setAutoMatch] = useState(true);
   const [upload, setUpload] = useState<number | null>(null);
   const [broken, setBroken] = useState<{ title: string; error: string }[]>([]);
-  const [sourceStatus, setSourceStatus] = useState<Record<string, { stage: string; error?: string }>>({});
+  const [sourceStatus, setSourceStatus] = useState<Record<string, { stage: string; error?: string; track_id?: number; title?: string }>>({});
   const [radio, setRadio] = useState<RadioStatus | null>(null);
   const [order, setOrder] = useState<OrderStatus | null>(null);
   const stationKey = useRef<string>("");
@@ -112,15 +114,22 @@ export default function App() {
         case "hello":
           setPhase(e.phase);
           break;
-        case "source_progress":
-          setSourceStatus((s) => ({ ...s, [e.id]: { stage: e.stage, error: e.error } }));
-          if (e.stage === "done") notify(`Added from Audius: ${e.title}`);
-          if (e.stage === "error") notify(`Audius: could not add ${e.title ?? e.id} - ${e.error}`);
+        case "source_progress": {
+          setSourceStatus((s) => ({ ...s, [e.id]: { stage: e.stage, error: e.error, track_id: e.track_id, title: e.title } }));
+          const srcLabel = e.source === "tiktok" ? "TikTok" : e.source === "youtube" ? "YouTube Music" : "Audius";
+          if (e.stage === "done") notify(`Added from ${srcLabel}: ${e.title ?? e.id}`);
+          if (e.stage === "error") notify(`${srcLabel}: could not add ${e.title ?? e.id} - ${e.error}`);
           break;
+        }
         case "radio": {
           const { type: _t, ...status } = e;
           void _t;
-          setRadio(status);
+          setRadio((prev) => {
+            if ((prev?.ready ?? 0) === 0 && status.ready > 0) {
+              setTimeout(() => void auto.replan(), 50);
+            }
+            return status;
+          });
           break;
         }
         case "order": {
@@ -150,10 +159,10 @@ export default function App() {
     return () => clearInterval(id);
   }, [rec.on, recorder]);
 
-  // Keyboard: space = play/pause live deck, Q/W = cue A/B.
+  // Keyboard: space = play/pause live deck, Q/W = cue A/B, 1..9 = Soundboard & Smart Chunks.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.target as HTMLElement).tagName === "INPUT") return;
+      if ((e.target as HTMLElement).tagName === "INPUT" || (e.target as HTMLElement).tagName === "SELECT") return;
       if (e.code === "Space") {
         e.preventDefault();
         void engine.resume();
@@ -161,25 +170,34 @@ export default function App() {
       }
       if (e.key === "q") decks.A.cue();
       if (e.key === "w") decks.B.cue();
+      const pad = SOUND_PADS.find((p) => p.key === e.key);
+      if (pad && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault();
+        soundboard.trigger(pad.id, "user");
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [engine, decks, autoState.live]);
+  }, [engine, decks, autoState.live, soundboard]);
 
-  /** AUDIUS tab open = AUTO mixes from that search; LIBRARY tab = your own music. */
-  const setStation = async (query: string | null, genre: string | null) => {
-    const key = `${query ?? ""}|${genre ?? ""}`;
+  /** AUDIUS / YOUTUBE tab open = AUTO mixes from that search; LIBRARY tab = your own music. */
+  const setStation = async (query: string | null, genre: string | null, source: "audius" | "stream" = "audius") => {
+    const key = `${source}|${query ?? ""}|${genre ?? ""}`;
     if (key === stationKey.current) return;
     stationKey.current = key;
     try {
-      setRadio(await api.radioStart(query, genre));
-      notify(`AUTO now mixes from Audius: ${query ?? `trending ${genre ?? ""}`}`);
-      void auto.replan();
+      const st = await api.radioStart(query, genre, source);
+      setRadio(st);
+      const label = source === "stream" ? "YouTube/TikTok" : "Audius";
+      notify(st.ready > 0
+        ? `AUTO now mixes from ${label}: ${query ?? `trending ${genre ?? ""}`} (${st.ready} ready)`
+        : `Warming up ${label} station: ${query ?? `trending ${genre ?? ""}`}...`);
+      if (st.ready > 0) void auto.replan();
     } catch (e) {
       notify((e as Error).message);
     }
   };
-  const onLibraryTab = async (tab: "mine" | "audius") => {
+  const onLibraryTab = async (tab: LibraryTab) => {
     if (tab === "mine" && radio?.active) {
       stationKey.current = "";
       setRadio(await api.radioStop());
@@ -237,6 +255,13 @@ export default function App() {
   const loadIdle = (trackId: number) => {
     const target = autoState.live ? decks[autoState.live === "A" ? "B" : "A"] : decks.A.playing ? decks.B : decks.A;
     void loadToDeck(target, trackId);
+  };
+
+  const mixIn = (trackId: number) => {
+    void auto.mixInTrack(trackId).then((style) => {
+      if (style === "OPENER") notify("Started set with your track - AUTO DJ active");
+      else if (style) notify(`Smoothly mixing in with ${style.replace(/_/g, " ").toUpperCase()}!`);
+    }).catch((e: unknown) => notify(`Mix in failed: ${(e as Error).message}`));
   };
 
   const toggleAuto = async () => {
@@ -313,6 +338,7 @@ export default function App() {
         a={decks.A} b={decks.B} crossfader={crossfader} onCrossfader={setCrossfader}
         level={() => engine.level()} mixProgress={autoState.mixProgress}
         lock={lock.store}
+        soundboard={soundboard}
         canManualMix={!autoState.enabled && !autoState.manualMix && a.playing !== b.playing && !!a.track && !!b.track}
         onManualMix={(s) => void auto.manualMix(s).then((used) => {
           if (used && s === "auto") notify(`Jev picked ${used.replace("_", " ").toUpperCase()} for this mix`);
@@ -335,6 +361,7 @@ export default function App() {
           musicDir={health?.music_dir ?? ""}
           onScan={(force) => api.scan(force).catch((e) => notify(e.message))}
           onLoad={loadIdle}
+          onMixIn={mixIn}
           onAddFiles={(f) => void addFiles(f)}
           onOpenFolder={() => void api.openFolder().catch((e) => notify(e.message))}
           upload={upload}
@@ -342,7 +369,7 @@ export default function App() {
           sourceStatus={sourceStatus}
           onError={notify}
           onTab={(t) => void onLibraryTab(t)}
-          onStation={(q, g) => void setStation(q, g)}
+          onStation={(q, g, src) => void setStation(q, g, src)}
           order={order}
           onOrder={(on, s) => void setSmartOrder(on, s)}
         />

@@ -18,9 +18,11 @@ TRANSITION_BARS = {
     "long_blend": 32, "quick_cut": 4, "filter_fade": 16, "echo_out": 8,
     "wash_out": 8, "brake": 2, "loop_roll": 4,
     "chop": 8, "tease": 8, "rewind": 2,
+    "log_drum_swap": 16, "word_play": 8, "double_drop": 16, "siren_spin": 2,
+    "stem_mashup": 16,
 }
 # Styles that drop the new track in on its drop (the energy lands on the one).
-DROP_STYLES = ("quick_cut", "loop_roll", "brake", "echo_out", "tease", "rewind")
+DROP_STYLES = ("quick_cut", "loop_roll", "brake", "echo_out", "tease", "rewind", "siren_spin", "word_play")
 FLAIRS = ("smooth", "creative", "turnt")
 # How long each track plays before Jev moves on (seconds). None = play to the outro.
 MIX_STYLES: dict[str, tuple[int, int] | None] = {"radio": None, "club": (110, 200), "quick": (50, 100)}
@@ -28,8 +30,8 @@ TRANSITION_STYLES = list(TRANSITION_BARS)
 
 SYNC_LIMIT = 0.08    # pitch range for a straight tempo sync
 BRIDGE_LIMIT = 0.16  # gaps up to this are bridged: outgoing ramps up/down, incoming starts halfway
-LOOPABLE = ("long_blend", "filter_fade")
-SYNCED = LOOPABLE + ("chop", "tease")  # both tracks sound together (or trade bars): tempos must match
+LOOPABLE = ("long_blend", "filter_fade", "log_drum_swap", "double_drop", "stem_mashup")
+SYNCED = LOOPABLE + ("chop", "tease", "word_play")  # both tracks sound together (or trade bars): tempos must match
 RAMP_BARS = 16
 
 PHASE_ENERGY = {"warm-up": 0.4, "build": 0.6, "peak": 0.82, "cool-down": 0.45}
@@ -66,6 +68,14 @@ def key_distance(a: Track, b: Track) -> int:
 def same_genre(a: Track, b: Track) -> bool:
     ga, gb = (a.get("genre") or "").lower(), (b.get("genre") or "").lower()
     return bool(ga) and ga == gb
+
+
+def _is_groove_genre(t: Track) -> bool:
+    g = (t.get("genre") or "").lower()
+    title = (t.get("title") or "").lower()
+    artist = (t.get("artist") or "").lower()
+    blob = f"{g} {title} {artist}"
+    return any(w in blob for w in ("amapiano", "piano", "afro", "house", "3-step", "3 step", "gqom", "deep", "tech", "dance", "club"))
 
 
 def target_energy(current: Track | None, phase: str) -> float:
@@ -197,21 +207,38 @@ def style_options(a: Track, b: Track, phase: str, mix_style: str = "club", flair
     delta = (b.get("energy") or 0.5) - (a.get("energy") or 0.5)
     kd = key_distance(a, b)
     synced_ok = abs(bpm_ratio(a["bpm"], b["bpm"]) - 1) <= BRIDGE_LIMIT
+    has_vocals = bool(a.get("vocal_bars")) and (sum(a.get("vocal_bars") or []) / max(len(a.get("vocal_bars") or []), 1)) > 0.35
+    groove = _is_groove_genre(a) or _is_groove_genre(b)
     routines: list[str] = []
     if synced_ok and kd <= 2 and delta > 0.05:
         routines.append("tease")  # tease the new drop over the outgoing hook, then switch
     if synced_ok and (kd > 2 or mix_style == "quick" or "hip" in (b.get("genre") or "")):
         routines.append("chop")  # trading bars never overlaps, so clashing keys are fine
+    if synced_ok and kd <= 1 and (phase == "peak" or (b.get("energy") or 0.5) >= 0.72):
+        routines.append("double_drop")  # layer both drops with swapped lows for massive peak energy
+    if synced_ok and kd <= 2 and groove:
+        routines.append("log_drum_swap")  # signature SA amapiano / afro house sub-bass & log-drum swap
+    if synced_ok and kd <= 2 and has_vocals:
+        routines.append("stem_mashup")  # live vocal acapella over incoming instrumental groove
+    if synced_ok and (has_vocals or "hip" in (a.get("genre") or "") or "r&b" in (a.get("genre") or "")):
+        routines.append("word_play")  # isolate vocal hook, echo-loop the phrase, slam incoming drop
     if flair == "turnt":
         if synced_ok and "chop" not in routines:
             routines.append("chop")
         if synced_ok and kd <= 2 and "tease" not in routines:
             routines.append("tease")
+        if synced_ok and kd <= 2 and "stem_mashup" not in routines:
+            routines.append("stem_mashup")
+        if synced_ok and "word_play" not in routines:
+            routines.append("word_play")
+        routines.append("siren_spin")
         routines.append("rewind")
         return routines + [s for s in base if s not in routines]
     # creative: routines lead when they clearly suit, otherwise they sit behind the classic moves
-    extra = [s for s in ("tease", "chop") if s not in routines and synced_ok and (s != "tease" or kd <= 2)]
-    return routines + base + extra
+    extra = [s for s in ("stem_mashup", "log_drum_swap", "word_play", "double_drop", "tease", "chop")
+             if s not in routines and synced_ok and (s not in ("tease", "log_drum_swap", "double_drop", "stem_mashup") or kd <= 2)]
+    out_opts = routines + [s for s in base if s not in routines]
+    return out_opts + [s for s in extra if s not in out_opts]
 
 
 def _base_options(a: Track, b: Track, phase: str, mix_style: str) -> list[str]:
@@ -361,7 +388,7 @@ def choose_out_bar(a: Track, start_s: float | None, mix_style: str, need: int) -
     waiting for the outro: the first phrase after the peak, inside the play-time window, off the vocals."""
     dbs = _downbeats(a)
     n = len(dbs)
-    last_ok = max(n - need - 1, 0)
+    last_ok = max(n - max(need, 4) - 1, 0)
     default = min(_bar_at(dbs, a.get("outro_start") or dbs[last_ok]), last_ok)
     window = MIX_STYLES.get(mix_style)
     if not window or n < 24:
@@ -439,7 +466,7 @@ def plan_transition(
 
     shifted = False
     should_shift = vocal_heavy_at(a, out_bar, need) if shift_vocals is None else shift_vocals
-    if should_shift:
+    if should_shift and style not in ("word_play", "stem_mashup"):
         new_bar = shift_for_vocals(a, out_bar, need)
         if new_bar != out_bar:
             notes.append(f"mix point moved from bar {out_bar} to {new_bar} to avoid vocals")
@@ -464,6 +491,12 @@ def plan_transition(
         in_bar = max(drop - bars, 0)
         in_bar -= in_bar % 4
         notes.append(f"chop: trading bars, landing on its bar {in_bar + bars}")
+    elif style == "double_drop":
+        # Double drop aligns the incoming build/drop so bar 4 hits the full drop energy together.
+        drop = first_drop_bar(b) or _bar_at(dbs_b, b.get("intro_end") or 0)
+        in_bar = max(drop - 4, 0)
+        in_bar -= in_bar % 4
+        notes.append(f"double drop: locking both drops at incoming bar {in_bar + 4}")
     elif style in DROP_STYLES:
         # Drop the new track straight in on its drop, so the energy lands on the one.
         in_bar = first_drop_bar(b) or max(_bar_at(dbs_b, b.get("intro_end") or 0) - 4, 0)

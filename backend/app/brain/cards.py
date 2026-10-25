@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.brain import rules
+
 VOCAL = 0.55
 
 
@@ -21,6 +23,14 @@ def track_card(t: dict[str, Any]) -> str:
     if vocals:
         parts.append(f"{_section(vocals, 0, 16)} intro")
         parts.append(f"{_section(vocals, len(vocals) - 16, len(vocals))} outro")
+        v_mean = sum(vocals) / len(vocals)
+        v_style = "vocal-led (good for stem_mashup/word_play)" if v_mean > 0.48 else "instrumental-groove (good for blends/double_drop)" if v_mean < 0.25 else "balanced vocals"
+        parts.append(v_style)
+    energy_bars = t.get("energy_bars") or []
+    if len(energy_bars) >= 16:
+        drop_bar = rules.first_drop_bar(t)
+        pk_start, pk_end = rules.peak_section(t)
+        parts.append(f"drop bar {drop_bar}, peak bars {pk_start}-{pk_end}")
     if t.get("genre"):
         parts.append(str(t["genre"]))
     return " | ".join(parts)

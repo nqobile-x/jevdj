@@ -1,17 +1,19 @@
 import type { AutoState } from "../audio/autodj";
 import { useEffect, useState } from "react";
 import { api } from "../api";
-import type { Decision, LearnedStyle, RadioStatus } from "../types";
+import type { CrateProfile, Decision, LearnedStyle, RadioStatus } from "../types";
 
 const STYLE_LABEL: Record<string, string> = {
   long_blend: "LONG BLEND", quick_cut: "QUICK CUT", filter_fade: "FILTER FADE", echo_out: "ECHO OUT",
   wash_out: "WASH OUT", brake: "BRAKE", loop_roll: "LOOP ROLL", chop: "CHOP", tease: "TEASE", rewind: "REWIND",
+  log_drum_swap: "LOG DRUM SWAP", word_play: "WORD PLAY", double_drop: "DOUBLE DROP", siren_spin: "SIREN SPIN",
+  stem_mashup: "STEM MASHUP",
 };
 
 const KIND_LABEL: Record<string, string> = {
   next_track: "NEXT", smoothness: "SMOOTH", transition_style: "STYLE", vocal_check: "VOCALS",
   set_phase: "PHASE", override: "OVERRIDE", voice: "VOICE", source: "SOURCE", grid_fix: "GRID", feedback: "RATED",
-  prelisten: "EARS",
+  prelisten: "EARS", soundboard: "FX PAD", training: "TRAINED",
 };
 
 function Conf({ value }: { value: number | null | undefined }) {
@@ -43,25 +45,58 @@ interface Props {
 
 function Learned({ onClose }: { onClose: () => void }) {
   const [styles, setStyles] = useState<Record<string, LearnedStyle> | null>(null);
+  const [profile, setProfile] = useState<CrateProfile | null>(null);
+  const [training, setTraining] = useState(false);
+
   useEffect(() => {
-    void api.learning().then((l) => setStyles(l.styles)).catch(() => setStyles({}));
+    void api.learning().then((l) => {
+      setStyles(l.styles);
+      if (l.profile) setProfile(l.profile);
+    }).catch(() => setStyles({}));
   }, []);
+
+  const runTrain = async () => {
+    setTraining(true);
+    try {
+      const r = await api.trainBrain();
+      setStyles(r.styles);
+      setProfile(r.profile);
+    } finally {
+      setTraining(false);
+    }
+  };
+
   const rows = Object.entries(styles ?? {}).sort((a, b) => b[1].bonus - a[1].bonus);
   return (
     <div className="learned">
       <div className="learned-head">
-        <span className="lbl">WHAT JEV LEARNED</span>
+        <span className="lbl">TRAINED DJ CRATE & MOVE MEMORY</span>
+        <button className="btn tiny go" disabled={training} onClick={() => void runTrain()} title="Re-analyse BPM, Camelot keys, vocals, and harmonic pairs across your Local + YouTube/Audius crate">
+          {training ? "TRAINING..." : "TRAIN DJ"}
+        </button>
         <button className="btn tiny warn" onClick={() => void api.resetLearning().then(() => setStyles({}))}>RESET</button>
         <button className="btn tiny" onClick={onClose}>CLOSE</button>
       </div>
-      {rows.length === 0 ? <div className="dim">Nothing yet. Rate mixes with 🔥 / 👎 and Jev leans toward what you like.</div> : rows.map(([s, v]) => (
+      {profile && profile.total_tracks > 0 && (
+        <div className="crate-summary">
+          <div className="mono small">
+            <b>{profile.total_tracks} TRACKS</b> ({profile.local_tracks} local · {profile.youtube_tracks} YouTube/TikTok · {profile.audius_tracks} Audius) · <b className="ok">{profile.smooth_pair_pct}%</b> harmonic pairs · {profile.vocal_led_pct}% vocal
+          </div>
+          {profile.bpm_clusters.length > 0 && (
+            <div className="dim small">
+              BPM sweet spots: {profile.bpm_clusters.map((c) => `${c.band} (${c.count})`).join(", ")} · Keys: {profile.top_keys.map((k) => `${k.camelot} (${k.count})`).join(", ")}
+            </div>
+          )}
+        </div>
+      )}
+      {rows.length === 0 ? <div className="dim">Nothing yet. Click TRAIN DJ or rate mixes with 🔥 / 👎 and Jev leans toward what fits your crate.</div> : rows.map(([s, v]) => (
         <div key={s} className="learned-row">
           <span>{STYLE_LABEL[s] ?? s}</span>
           <span className="mono dim">🔥 {v.up} · 👎 {v.down}</span>
           <span className="bias"><i style={{ left: `${50 + v.bonus * 100}%` }} /></span>
         </div>
       ))}
-      <div className="dim small">Preferences only nudge Jev's choice. Musical safety rules (keys, tempo) always win.</div>
+      <div className="dim small">Preferences and crate training guide Jev's choice. Musical safety rules (keys, tempo) always win.</div>
     </div>
   );
 }
@@ -84,7 +119,7 @@ export function AIPanel({ auto, decisions, onVeto, onPickAnother, onMixNow, onSw
           <span className="lbl">FROM</span>
           <span className="val ellipsis">
             {radio?.active
-              ? <>AUDIUS · {radio.query ?? `trending ${radio.genre ?? ""}`} <span className="dim">({radio.ready} ready{radio.adding ? `, preparing ${radio.adding}` : ""})</span></>
+              ? <>{radio.source === "stream" ? "YOUTUBE / TIKTOK" : "AUDIUS"} · {radio.query ?? `trending ${radio.genre ?? ""}`} <span className="dim">({radio.ready} ready{radio.adding ? `, preparing ${radio.adding}` : ""})</span></>
               : "YOUR LIBRARY"}
           </span>
         </div>

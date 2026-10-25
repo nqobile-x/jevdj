@@ -1,5 +1,5 @@
 import type {
-  Decision, Flair, Health, LearnedStyle, MixStyle, NextResponse, OrderShape, OrderStatus, RadioStatus, ServerEvent, TrackDetail, TrackSummary, TransitionPlan, Vibe, VoiceLine,
+  CrateProfile, Decision, Flair, Health, LearnedStyle, MixStyle, NextResponse, OrderShape, OrderStatus, RadioStatus, ServerEvent, TrackDetail, TrackSummary, TransitionPlan, Vibe, VoiceLine,
 } from "./types";
 
 export const API = "/api";
@@ -20,6 +20,7 @@ export interface AudiusTrack {
   added: boolean;
   adding: boolean;
   track_id: number | null;
+  platform?: "youtube" | "tiktok";
 }
 
 async function req<T>(path: string, init?: RequestInit & { json?: unknown }): Promise<T> {
@@ -83,7 +84,10 @@ export const api = {
   audiusSearch: (q: string) => req<AudiusTrack[]>(`/sources/audius/search?q=${encodeURIComponent(q)}&limit=40`),
   audiusTrending: (genre: string) => req<AudiusTrack[]>(`/sources/audius/trending?genre=${encodeURIComponent(genre)}&limit=40`),
   audiusAdd: (id: string) => post<{ queued: boolean }>("/sources/audius/add", { id }),
-  radioStart: (query: string | null, genre: string | null = null) => post<RadioStatus>("/radio/start", { query, genre }),
+  streamSearch: (q: string) => req<AudiusTrack[]>(`/sources/stream/search?q=${encodeURIComponent(q)}&limit=25`),
+  streamAdd: (id: string, url?: string | null) => post<{ queued: boolean; id: string; track_id?: number }>("/sources/stream/add", { id, url }),
+  radioStart: (query: string | null, genre: string | null = null, source: "audius" | "stream" = "audius") =>
+    post<RadioStatus>("/radio/start", { query, genre, source }),
   radioStop: () => post<RadioStatus>("/radio/stop"),
   setFlair: (flair: Flair) => post("/set/flair", { flair }),
   order: () => req<OrderStatus>("/set/order"),
@@ -91,12 +95,15 @@ export const api = {
     post<OrderStatus>("/set/order", { active, shape, current_id }),
   feedback: (value: 1 | -1, style: string, note?: string) =>
     post<{ learned: Record<string, LearnedStyle> }>("/feedback", { kind: "transition", value, style, note }),
-  learning: () => req<{ styles: Record<string, LearnedStyle> }>("/learning"),
+  learning: () => req<{ styles: Record<string, LearnedStyle>; profile?: CrateProfile }>("/learning"),
+  trainBrain: () => post<{ ok: boolean; profile: CrateProfile; styles: Record<string, LearnedStyle> }>("/brain/train"),
   resetLearning: () => post("/learning/reset"),
   alternatives: (from_id: number, to_id: number, start_s: number | null, exclude: string[]) =>
     post<TransitionPlan[]>("/brain/alternatives", { from_id, to_id, start_s, exclude }),
   prelistenLog: (body: { score: number; style: string; issues: string[]; fixes: string[]; beat_error_ms: number | null;
     switched_from?: string | null; render_ms?: number }) => post("/brain/prelisten", body),
+  soundboardLog: (pad: string, label: string, source: "user" | "jev", reason: string) =>
+    post<{ decision_id: number }>("/brain/soundboard", { pad, label, source, reason }),
 };
 
 /** Reconnecting WebSocket for /events. */

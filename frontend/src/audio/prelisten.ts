@@ -19,7 +19,7 @@ import { Engine } from "./engine";
 import { runPlan } from "./transitions";
 
 const SR = 22050; // analysis rate: plenty for kicks and chroma, renders fast
-const DROPS = new Set(["quick_cut", "loop_roll", "brake", "echo_out", "rewind", "tease", "wash_out"]);
+const DROPS = new Set(["quick_cut", "loop_roll", "brake", "echo_out", "rewind", "tease", "wash_out", "siren_spin", "word_play"]);
 
 export interface PrelistenReport {
   score: number; // 0..10
@@ -283,7 +283,7 @@ function analyse(r: Rendered, plan: TransitionPlan, input: PrelistenInput): Prel
 
   // Dead air and level cliffs in the combined mix.
   const beat = r.bar / 4;
-  const allowSilence = plan.style === "brake" || plan.style === "rewind" ? 2 : 0;
+  const allowSilence = plan.style === "brake" || plan.style === "rewind" || plan.style === "siren_spin" ? 2 : 0;
   let silent = 0;
   let cliff = 0;
   let prevDb: number | null = null;

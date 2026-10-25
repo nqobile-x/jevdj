@@ -26,7 +26,7 @@ from pydantic import BaseModel, Field
 
 from app.analysis.audio_io import NATIVE, NotAudioError, check_audio, sniff, to_flac
 from app.analysis.watcher import LibraryWatcher, snapshot
-from app.sources import audius
+from app.sources import audius, ytstream
 from app.analysis.scanner import find_audio, scan_library
 from app.brain import order as smart
 from app.brain import rules
@@ -106,6 +106,13 @@ class PrelistenLogBody(BaseModel):
     render_ms: int | None = None
 
 
+class SoundboardLogBody(BaseModel):
+    pad: str
+    label: str
+    source: str = "jev"  # user | jev
+    reason: str = ""
+
+
 class FeedbackBody(BaseModel):
     kind: str = "transition"  # transition | track
     value: float = Field(ge=-1, le=1)  # +1 fire, -1 nah
@@ -137,12 +144,14 @@ class VibeBody(BaseModel):
 
 
 class SourceAddBody(BaseModel):
-    id: str
+    id: str = ""
+    url: str | None = None
 
 
 class RadioBody(BaseModel):
     query: str | None = None  # None = trending
     genre: str | None = None
+    source: str = "audius"  # audius | stream
 
 
 class OrderBody(BaseModel):
@@ -172,7 +181,26 @@ def create_app(settings: Settings = default_settings, jev_client: Any = None) ->
                     settings.groq_tts_model, settings.groq_tts_voice)
     scan_lock = threading.Lock()
     rng = random.Random()
-    transcode_dir = settings.db_path.parent / "transcode"
+    crate_profile: dict[str, Any] = {"data": None}
+    base_data_dir = settings.voice_dir.parent if str(settings.db_path) == ":memory:" else settings.db_path.parent
+    transcode_dir = base_data_dir / "transcode"
+
+    def refresh_crate_profile(log_it: bool = False) -> dict[str, Any]:
+        try:
+            prof = db.train_crate_profile()
+            crate_profile["data"] = prof
+            if log_it and prof.get("total_tracks", 0) > 0:
+                log_decision({
+                    "set_id": state.set_id, "kind": "training", "source": "jev" if brain.online else "rules",
+                    "question": "train DJ on local + YouTube/Audius crate",
+                    "answer": f"Trained on {prof['total_tracks']} tracks ({prof['smooth_pair_pct']}% smooth pairs)",
+                    "confidence": round(min(0.99, 0.72 + 0.01 * min(prof["total_tracks"], 25)), 2),
+                    "reason": prof["summary"],
+                })
+            return prof
+        except Exception as exc:
+            log.warning("crate training error: %s", exc)
+            return crate_profile.get("data") or {}
 
     def start_scan(force: bool = False, reason: str = "manual") -> bool:
         """Run a scan in the background. False if one is already running."""
@@ -183,6 +211,7 @@ def create_app(settings: Settings = default_settings, jev_client: Any = None) ->
             try:
                 bus.publish({"type": "scan_reason", "reason": reason})
                 scan_library(db, settings.music_dir, progress=bus.publish, force=force)
+                refresh_crate_profile(log_it=True)
             except Exception as exc:
                 log.exception("scan failed")
                 bus.publish({"type": "scan_finished", "error": str(exc)})
@@ -211,11 +240,34 @@ def create_app(settings: Settings = default_settings, jev_client: Any = None) ->
     async def lifespan(_app: FastAPI):
         bus.bind(asyncio.get_running_loop())
         state.set_id = db.latest_set()
+        # Upgrade any existing tracks in SQLite that have missing/generic genres ('youtube', 'tiktok', '')
+        try:
+            from app.analysis.analyser import infer_genre
+
+            for t in db.get_tracks_full():
+                g = (t.get("genre") or "").strip().lower()
+                if not g or g in ("youtube", "tiktok", "music", "entertainment", "people & blogs", "other", "unknown"):
+                    vb = t.get("vocal_bars") or []
+                    v_mean = sum(vb) / len(vb) if vb else 0.35
+                    new_g = infer_genre(
+                        bpm=float(t.get("bpm") or 120.0),
+                        energy=float(t.get("energy") or 0.5),
+                        perc_ratio=0.35,
+                        vocal_mean=float(v_mean),
+                        low_ratio=0.35 if 109 <= (t.get("bpm") or 0) <= 116.5 else 0.25,
+                        title=str(t.get("title") or ""),
+                        artist=str(t.get("artist") or ""),
+                    )
+                    db._exec("UPDATE tracks SET genre = ? WHERE id = ?", (new_g, t["id"]))
+            crate_profile["data"] = db.train_crate_profile()
+        except Exception as exc:
+            log.warning("genre backfill / crate training skipped: %s", exc)
         if watcher:
             watcher.start()
         yield
         if watcher:
             watcher.stop()
+        radio["active"] = False
         brain.close()
         db.close()
 
@@ -251,7 +303,7 @@ def create_app(settings: Settings = default_settings, jev_client: Any = None) ->
             "music_dir": str(settings.music_dir),
             "music_dir_exists": settings.music_dir.exists(),
             "tracks": len(db.list_tracks()),
-            "audius_cache_mb": round(audius.cache_size(settings.db_path.parent / "audius") / 1e6, 1),
+            "audius_cache_mb": round(audius.cache_size(base_data_dir / "audius") / 1e6, 1),
             "set_id": state.set_id,
             "phase": state.phase,
             "vibe": state.vibe,
@@ -311,7 +363,7 @@ def create_app(settings: Settings = default_settings, jev_client: Any = None) ->
 
     # ------------------------------------------------------------ online source: Audius
 
-    audius_dir = settings.db_path.parent / "audius"
+    audius_dir = base_data_dir / "audius"
     audius_busy: set[str] = set()
 
     def _mark_added(items: list[dict]) -> list[dict]:
@@ -366,10 +418,10 @@ def create_app(settings: Settings = default_settings, jev_client: Any = None) ->
             emit("downloading", title=meta["title"])
             path = audius.fetch(tid, audius_dir)
             emit("analysing", title=meta["title"])
-            from app.analysis.analyser import analyse_file
+            import app.analysis.analyser as analyser
 
             try:
-                a = analyse_file(path).to_dict()
+                a = analyser.analyse_file(path).to_dict()
             finally:
                 path.unlink(missing_ok=True)  # streaming only: keep the analysis, not the audio
             # Audius metadata is cleaner than file tags: credit the uploader.
@@ -377,8 +429,11 @@ def create_app(settings: Settings = default_settings, jev_client: Any = None) ->
             a.update(source="audius", source_id=tid, permalink=meta["permalink"], artwork=meta["artwork"])
             a["path"] = f"audius:{tid}"  # no file on disk
             track_id = db.upsert_track(a, 0.0)
+            refresh_crate_profile(log_it=False)
             emit("done", title=meta["title"], track_id=track_id)
             bus.publish({"type": "scan_finished", "analysed": 1, "failed": 0, "quiet": True})
+            if radio["active"]:
+                bus.publish(radio_status())
             return track_id
         except Exception as exc:
             log.warning("Audius add %s failed: %s", tid, exc)
@@ -386,6 +441,100 @@ def create_app(settings: Settings = default_settings, jev_client: Any = None) ->
             return None
         finally:
             audius_busy.discard(tid)
+
+    # ------------------------------------------------------------ online source: YouTube Music / TikTok
+
+    stream_dir = base_data_dir / "streams"
+    stream_busy: set[str] = set()
+    stream_urls: dict[str, str] = {}
+    stream_meta: dict[str, dict[str, Any]] = {}
+
+    def _mark_stream_added(items: list[dict]) -> list[dict]:
+        have = {**db.source_ids("youtube"), **db.source_ids("tiktok")}
+        out = []
+        for t in items:
+            if t.get("permalink"):
+                stream_urls[t["id"]] = t["permalink"]
+            stream_meta[t["id"]] = t
+            row = {**t, "added": t["id"] in have, "track_id": have.get(t["id"]), "adding": t["id"] in stream_busy,
+                   "energy": None}
+            if row["track_id"]:
+                mine = db.get_track(row["track_id"], full=False) or {}
+                row.update(energy=mine.get("energy"), bpm=mine.get("bpm") or t.get("bpm"),
+                           camelot=mine.get("camelot") or t.get("camelot"))
+            out.append(row)
+        return out
+
+    @app.get("/sources/stream/search")
+    async def stream_search(q: str = Query(min_length=1, max_length=250), limit: int = 20, min_seconds: int = 30):
+        try:
+            return _mark_stream_added(await asyncio.to_thread(ytstream.search, q, limit, min_seconds))
+        except Exception as exc:
+            raise HTTPException(502, f"Stream search failed: {exc}") from exc
+
+    @app.post("/sources/stream/add")
+    async def stream_add(body: SourceAddBody) -> dict[str, Any]:
+        """Download and analyse a YouTube, YouTube Music, or TikTok track into the stream library."""
+        url = (body.url or "").strip() or None
+        tid = (body.id or "").strip()
+        if not tid and url:
+            try:
+                info = await asyncio.to_thread(ytstream.resolve_url, url)
+                tid = info["id"]
+                stream_urls[tid] = info.get("permalink") or url
+            except Exception as exc:
+                raise HTTPException(400, f"Could not resolve URL: {exc}") from exc
+        try:
+            tid = ytstream.safe_id(tid)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        if url:
+            stream_urls[tid] = url
+        have = {**db.source_ids("youtube"), **db.source_ids("tiktok")}
+        if tid in have:
+            return {"queued": False, "already": True, "id": tid, "track_id": have[tid]}
+        if tid in stream_busy:
+            return {"queued": False, "busy": True, "id": tid}
+        stream_busy.add(tid)
+        threading.Thread(target=add_stream, args=(tid, stream_urls.get(tid)), daemon=True, name=f"stream-{tid}").start()
+        return {"queued": True, "id": tid}
+
+    def add_stream(tid: str, url: str | None = None) -> int | None:
+        """Download, analyse and register one YouTube/TikTok track (blocking). Returns the library id."""
+        stream_busy.add(tid)
+        plat = "tiktok" if tid.startswith("tiktok_") else "youtube"
+        emit = lambda stage, **kw: bus.publish({"type": "source_progress", "source": plat, "id": tid, "stage": stage, **kw})
+        try:
+            hint = stream_meta.get(tid) or {}
+            emit("downloading", title=hint.get("title") or tid)
+            try:
+                path, meta = ytstream.fetch(tid, stream_dir, url or stream_urls.get(tid), meta_hint=hint or None)
+            except TypeError:
+                path, meta = ytstream.fetch(tid, stream_dir, url or stream_urls.get(tid))
+            emit("analysing", title=meta["title"])
+            import app.analysis.analyser as analyser
+
+            a = analyser.analyse_file(path).to_dict()
+            meta_genre = (meta.get("genre") or "").strip().lower()
+            if meta_genre in ("youtube", "tiktok", "music", "entertainment", "people & blogs", ""):
+                meta_genre = ""
+            a.update(title=meta["title"] or a["title"], artist=meta["artist"] or a["artist"],
+                     genre=meta_genre or a["genre"] or plat)
+            a.update(source=plat, source_id=tid, permalink=meta.get("permalink"), artwork=meta.get("artwork"))
+            a["path"] = str(path.resolve())
+            track_id = db.upsert_track(a, path.stat().st_mtime)
+            refresh_crate_profile(log_it=False)
+            emit("done", title=meta["title"], track_id=track_id)
+            bus.publish({"type": "scan_finished", "analysed": 1, "failed": 0, "quiet": True})
+            if radio["active"]:
+                bus.publish(radio_status())
+            return track_id
+        except Exception as exc:
+            log.warning("Stream add %s failed: %s", tid, exc)
+            emit("error", error=str(exc)[:200])
+            return None
+        finally:
+            stream_busy.discard(tid)
 
     # ------------------------------------------------------------ SMART ORDER
 
@@ -397,8 +546,9 @@ def create_app(settings: Settings = default_settings, jev_client: Any = None) ->
         library = db.get_tracks_full()
         if radio["active"]:
             pool = radio_pool()
-            return [t for t in library if t["id"] in pool], "audius"
-        return library, "library"
+            scope = "stream" if radio.get("source") == "stream" else "audius"
+            return [t for t in library if t["id"] in pool], scope
+        return [t for t in library if not t.get("source")], "library"
 
     def order_played() -> list[int]:
         """Tracks played since SMART ORDER was switched on (or since the last lap)."""
@@ -427,7 +577,7 @@ def create_app(settings: Settings = default_settings, jev_client: Any = None) ->
             head = [i for i in dict.fromkeys(played) if i != cur_id] + ([cur_id] if cur_id else [])
             remaining = [t for t in pool if t["id"] not in set(head)]
             total = len(head) + len(remaining)
-            if scope == "audius":
+            if scope in ("audius", "stream"):
                 total = max(total, len(radio["ids"]))
             planned = smart.smart_order(remaining, order["shape"], current, offset=len(head), total=total,
                                         taste=db.taste())
@@ -531,62 +681,108 @@ def create_app(settings: Settings = default_settings, jev_client: Any = None) ->
                                 f"energy arc, {pct if pct is not None else '-'}% smooth transitions"})
         return order_status()
 
-    # ------------------------------------------------------------ Audius station (auto mix from Audius)
+    # ------------------------------------------------------------ Online station (auto mix from Audius or YouTube/TikTok)
 
-    radio: dict[str, Any] = {"active": False, "query": None, "genre": None, "ids": [], "failed": set()}
+    radio: dict[str, Any] = {"active": False, "source": "audius", "query": None, "genre": None, "ids": [], "failed": set()}
     radio_lock = threading.Lock()
-    RADIO_AHEAD = 3  # keep this many analysed, unplayed station tracks ready
-    RADIO_AHEAD_ORDERED = 6  # SMART ORDER gets more tracks to arrange
+    RADIO_AHEAD = 5  # keep this many analysed, unplayed station tracks ready so Jev has harmonic choices
+    RADIO_AHEAD_ORDERED = 8  # SMART ORDER gets more tracks to arrange
+
+    def _radio_have() -> dict[str, int]:
+        if radio.get("source") == "stream":
+            return {**db.source_ids("youtube"), **db.source_ids("tiktok")}
+        return db.source_ids("audius")
 
     def radio_pool() -> set[int]:
-        have = db.source_ids("audius")
+        have = _radio_have()
         return {have[sid] for sid in radio["ids"] if sid in have}
 
     def radio_status() -> dict[str, Any]:
         recent = set(db.recent_track_ids(state.set_id, settings.recent_block))
         pool = radio_pool()
-        return {"type": "radio", "active": radio["active"], "query": radio["query"], "genre": radio["genre"],
-                "ready": len(pool - recent), "total": len(radio["ids"]), "adding": len(audius_busy)}
+        busy = stream_busy if radio.get("source") == "stream" else audius_busy
+        return {"type": "radio", "active": radio["active"], "source": radio.get("source", "audius"),
+                "query": radio["query"], "genre": radio["genre"],
+                "ready": len(pool - recent), "total": len(radio["ids"]), "adding": len(busy)}
 
     def radio_fill() -> None:
-        """Keep RADIO_AHEAD station tracks analysed ahead of playback (runs in a thread)."""
+        """Keep RADIO_AHEAD station tracks analysed ahead of playback (runs in a thread with parallel workers)."""
         if not radio_lock.acquire(blocking=False):
             return
+        from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+
+        pool_exec = ThreadPoolExecutor(max_workers=3)
         try:
             while radio["active"]:
                 status = radio_status()
-                if status["ready"] >= (RADIO_AHEAD_ORDERED if order["active"] else RADIO_AHEAD):
+                target = RADIO_AHEAD_ORDERED if order["active"] else RADIO_AHEAD
+                if status["ready"] >= target:
                     break
-                have = db.source_ids("audius")
-                todo = [s for s in radio["ids"] if s not in have and s not in radio["failed"] and s not in audius_busy]
+                is_stream = radio.get("source") == "stream"
+                have = _radio_have()
+                busy = stream_busy if is_stream else audius_busy
+                todo = [s for s in radio["ids"] if s not in have and s not in radio["failed"] and s not in busy]
                 if not todo:
                     break
                 ids_before = list(radio["ids"])
-                if add_audius(todo[0]) is None:
-                    radio["failed"].add(todo[0])
-                if radio["ids"] != ids_before:  # station changed meanwhile
-                    continue
-                bus.publish(radio_status())
-                if order["active"]:
-                    order_rebuild(None)
+                need_now = max(1, min(3, target - status["ready"], len(todo)))
+                batch = todo[:need_now]
+
+                def _work(sid: str) -> tuple[str, int | None]:
+                    aid = add_stream(sid, stream_urls.get(sid)) if is_stream else add_audius(sid)
+                    return sid, aid
+
+                futures_map = {pool_exec.submit(_work, sid): sid for sid in batch}
+                pending = set(futures_map.keys())
+                while pending and radio["active"]:
+                    done, pending = wait(pending, timeout=0.5, return_when=FIRST_COMPLETED)
+                    if not done:
+                        continue
+                    for f in done:
+                        fallback_sid = futures_map.get(f, "")
+                        try:
+                            sid, added_id = f.result()
+                        except Exception:
+                            sid, added_id = fallback_sid, None
+                        if sid and added_id is None:
+                            radio["failed"].add(sid)
+                    if radio["ids"] != ids_before:
+                        break
+                    bus.publish(radio_status())
+                    if order["active"]:
+                        order_rebuild(None)
         finally:
+            pool_exec.shutdown(wait=False, cancel_futures=True)
             radio_lock.release()
             bus.publish(radio_status())
 
     @app.post("/radio/start")
     async def radio_start(body: RadioBody) -> dict[str, Any]:
-        """Auto-mix from Audius: a station built from a search (or trending)."""
+        """Auto-mix from Audius or YouTube/TikTok: a station built from a search (or trending)."""
+        src = "stream" if body.source == "stream" else "audius"
         try:
-            if body.query:
+            if src == "stream":
+                q = (body.query or body.genre or "amapiano").strip()
+                results = await asyncio.to_thread(ytstream.search, q, 25)
+                for t in results:
+                    if t.get("permalink"):
+                        stream_urls[t["id"]] = t["permalink"]
+                    stream_meta[t["id"]] = t
+            elif body.query:
                 results = await asyncio.to_thread(audius.search, body.query, 40)
             else:
                 results = await asyncio.to_thread(audius.trending, body.genre, "week", 40)
         except Exception as exc:
-            raise HTTPException(502, f"Audius failed: {exc}") from exc
-        radio.update(active=True, query=body.query, genre=body.genre, ids=[t["id"] for t in results], failed=set())
+            raise HTTPException(502, f"{src.capitalize()} station failed: {exc}") from exc
+        # Put any tracks from this search that are already analysed at the front so the station starts in 0s.
+        have_now = ({**db.source_ids("youtube"), **db.source_ids("tiktok")} if src == "stream" else db.source_ids("audius"))
+        raw_ids = [t["id"] for t in results]
+        ordered_ids = [i for i in raw_ids if i in have_now] + [i for i in raw_ids if i not in have_now]
+        radio.update(active=True, source=src, query=body.query, genre=body.genre, ids=ordered_ids, failed=set())
+        label = "YouTube/TikTok" if src == "stream" else "Audius"
         log_decision({"set_id": state.set_id, "kind": "source", "source": "user", "question": "auto-mix source",
-                      "answer": f"Audius: {body.query or 'trending ' + (body.genre or '')}".strip(),
-                      "reason": f"{len(results)} full-length tracks in the station"})
+                      "answer": f"{label}: {body.query or 'trending ' + (body.genre or '')}".strip(),
+                      "reason": f"{len(results)} tracks in the station"})
         threading.Thread(target=radio_fill, daemon=True, name="radio-fill").start()
         if order["active"]:
             order_rebuild(None)
@@ -692,13 +888,50 @@ def create_app(settings: Settings = default_settings, jev_client: Any = None) ->
         if radio["active"]:
             pool = radio_pool()
             recent_ids = set(body.history[-settings.recent_block:]) | set(db.recent_track_ids(set_id, settings.recent_block))
-            fresh = pool - recent_ids - set(body.exclude) - ({current["id"]} if current else set())
+            hard_block = set(body.exclude) | ({current["id"]} if current else set())
+            fresh = pool - recent_ids - hard_block
             threading.Thread(target=radio_fill, daemon=True, name="radio-fill").start()
-            if not fresh:
-                if len(radio["ids"]) > len(pool) + len(radio["failed"]):
-                    raise HTTPException(409, "Audius station warming up - preparing the next track")
-                # Station exhausted: allow repeats rather than stop the music.
-            library = [t for t in library if t["id"] in pool] or library
+            if not fresh and len(radio["ids"]) > len(pool) + len(radio["failed"]):
+                # Wait up to 8s for parallel radio_fill workers to finish a station track.
+                for _ in range(20):
+                    await asyncio.sleep(0.4)
+                    pool = radio_pool()
+                    fresh = pool - recent_ids - hard_block
+                    if fresh:
+                        break
+                if not fresh:
+                    all_tracks = db.get_tracks_full()
+                    is_stream = radio.get("source") == "stream"
+                    pool_repeat = [t for t in all_tracks if t["id"] in pool and t["id"] not in hard_block]
+                    same_src = [t for t in all_tracks if (t.get("source") in ("youtube", "tiktok") if is_stream else t.get("source") == "audius") and t["id"] not in hard_block]
+                    any_avail = [t for t in all_tracks if t["id"] not in hard_block]
+                    if pool_repeat:
+                        library = pool_repeat
+                    elif same_src:
+                        library = same_src
+                    elif any_avail:
+                        library = any_avail
+                    else:
+                        label = "YouTube/TikTok" if is_stream else "Audius"
+                        raise HTTPException(409, f"{label} station warming up - preparing the next track")
+                else:
+                    library = [t for t in db.get_tracks_full() if t["id"] in pool]
+            else:
+                station_tracks = [t for t in library if t["id"] in pool]
+                # If only 1-2 station tracks are analysed so far and none mix smoothly with `current`,
+                # blend in compatible already-analysed tracks so the DJ never throws in a clashing cut!
+                if current and 0 < len(station_tracks) <= 2:
+                    fresh_station = [t for t in station_tracks if t["id"] not in hard_block]
+                    if fresh_station and max((rules.transition_smoothness(current, t) for t in fresh_station), default=0) == 0:
+                        compat = [t for t in library if t["id"] not in pool and t["id"] not in hard_block
+                                  and rules.transition_smoothness(current, t) >= 2]
+                        if compat:
+                            station_tracks = station_tracks + compat[:4]
+                library = station_tracks or library
+        else:
+            local_only = [t for t in library if not t.get("source")]
+            if local_only:
+                library = local_only
 
         # Every 5 tracks in auto vibe, Jev scores where the set should go next.
         if state.vibe == "auto" and state.played >= 5 and state.played - state.phase_checked_at >= 5:
@@ -733,10 +966,11 @@ def create_app(settings: Settings = default_settings, jev_client: Any = None) ->
             f"{o['action']}: {o.get('artist') or ''} {o.get('title') or ''} {o.get('note') or ''}".strip()
             for o in db.recent_overrides(set_id)
         ]
+        prof = crate_profile.get("data") or refresh_crate_profile(log_it=False)
         result = await brain.choose_next(
             current, cands,
             {"phase": state.phase, "vibe": state.vibe, "last_cards": last_cards, "overrides": overrides,
-             "taste": taste, "taste_text": taste_text, "switch": body.switch},
+             "taste": taste, "taste_text": taste_text, "crate_profile": prof.get("summary"), "switch": body.switch},
             set_id,
         )
         t = result["track"]
@@ -786,6 +1020,19 @@ def create_app(settings: Settings = default_settings, jev_client: Any = None) ->
         })
         return {"decision_id": saved["id"]}
 
+    @app.post("/brain/soundboard")
+    def brain_soundboard(body: SoundboardLogBody) -> dict[str, Any]:
+        """Log a manual or auto-DJ soundboard / smart-chunk trigger."""
+        src = "user" if body.source == "user" else "jev"
+        saved = log_decision({
+            "set_id": state.set_id, "kind": "soundboard", "source": src,
+            "question": "soundboard & smart chunk sampler",
+            "answer": body.label, "confidence": 0.92 if src == "jev" else None,
+            "reason": body.reason or ("manual pad hit" if src == "user" else "auto phrase hype"),
+            "extra": {"pad": body.pad},
+        })
+        return {"decision_id": saved["id"]}
+
     @app.post("/set/flair")
     def set_flair(body: FlairBody) -> dict[str, Any]:
         if body.flair not in rules.FLAIRS:
@@ -807,7 +1054,19 @@ def create_app(settings: Settings = default_settings, jev_client: Any = None) ->
 
     @app.get("/learning")
     def learning() -> dict[str, Any]:
-        return {"styles": db.learned_styles(), "taste": db.taste()}
+        prof = crate_profile.get("data") or refresh_crate_profile(log_it=False)
+        return {"styles": db.learned_styles(), "taste": db.taste(), "profile": prof}
+
+    @app.post("/brain/train")
+    def brain_train() -> dict[str, Any]:
+        """Train Jev and the rule engine on the listener's local music + YouTube/Audius crate."""
+        ensure_set()
+        prof = refresh_crate_profile(log_it=True)
+        return {"ok": True, "profile": prof, "styles": db.learned_styles()}
+
+    @app.get("/brain/profile")
+    def brain_profile() -> dict[str, Any]:
+        return crate_profile.get("data") or refresh_crate_profile(log_it=False)
 
     @app.post("/learning/reset")
     def learning_reset() -> dict[str, Any]:
@@ -964,4 +1223,9 @@ def _flac_copy(src: Path, out_dir: Path, track_id: int) -> Path:
     return dst
 
 
-app = create_app()
+def __getattr__(name: str) -> Any:
+    if name == "app":
+        global app
+        app = create_app()
+        return app
+    raise AttributeError(name)

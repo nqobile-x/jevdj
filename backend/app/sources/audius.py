@@ -9,6 +9,7 @@ Docs: https://docs.audius.co  (no key needed; app_name identifies us)
 from __future__ import annotations
 
 import logging
+import math
 import re
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,11 @@ API = "https://api.audius.co/v1"
 APP_NAME = "JevDJ"
 MIN_SECONDS = 90  # skip snippets and teasers by default
 MAX_SECONDS = 600  # skip full DJ mixes: Jev mixes tracks, not other people's mixes
+
+_JUNK_RE = re.compile(
+    r"\b(?:podcast|interview|episode\s+\d+|full\s+set|1\s*hour|2\s*hours|dj\s+mix|radio\s+show)\b",
+    re.IGNORECASE,
+)
 
 
 def _client() -> httpx.Client:
@@ -60,7 +66,38 @@ def _camelot(key: str | None) -> str | None:
 
 def _filter(tracks: list[dict], min_seconds: int) -> list[dict]:
     out = [_summary(t) for t in tracks if t.get("id")]
-    return [t for t in out if t["streamable"] and min_seconds <= t["duration"] <= MAX_SECONDS]
+    return [
+        t for t in out
+        if t["streamable"]
+        and min_seconds <= t["duration"] <= MAX_SECONDS
+        and not _JUNK_RE.search(t.get("title") or "")
+    ]
+
+
+def _rank_search(tracks: list[dict[str, Any]], query: str) -> list[dict[str, Any]]:
+    """Curate search results so typing an artist or vibe puts their biggest club hits first."""
+    q_low = query.lower().strip()
+    q_tokens = [w for w in re.split(r"\W+", q_low) if len(w) >= 2]
+
+    def score(t: dict[str, Any]) -> float:
+        artist_low = (t.get("artist") or "").lower()
+        handle_low = (t.get("handle") or "").lower()
+        title_low = (t.get("title") or "").lower()
+        genre_low = (t.get("genre") or "").lower()
+        plays = max(int(t.get("plays") or 0), 1)
+        sc = math.log10(plays) * 1.5
+        if q_low and (q_low in artist_low or q_low in handle_low):
+            sc += 5.5
+        elif q_low and q_low in title_low:
+            sc += 4.0
+        elif q_tokens:
+            hits = sum(1 for w in q_tokens if w in artist_low or w in title_low or w in genre_low)
+            sc += 3.5 * (hits / len(q_tokens))
+        if 140 <= (t.get("duration") or 0) <= 450:
+            sc += 1.0
+        return sc
+
+    return sorted(tracks, key=score, reverse=True)
 
 
 def search(query: str, limit: int = 30, min_seconds: int = MIN_SECONDS) -> list[dict[str, Any]]:
@@ -68,7 +105,8 @@ def search(query: str, limit: int = 30, min_seconds: int = MIN_SECONDS) -> list[
         # Ask for a full page: Audius defaults to 10, and snippets get filtered out below.
         r = c.get(f"{API}/tracks/search", params={"query": query, "app_name": APP_NAME, "limit": 50})
         r.raise_for_status()
-        return _filter(r.json().get("data") or [], min_seconds)[:limit]
+        filtered = _filter(r.json().get("data") or [], min_seconds)
+        return _rank_search(filtered, query)[:limit]
 
 
 def trending(genre: str | None = None, time: str = "week", limit: int = 30, min_seconds: int = MIN_SECONDS) -> list[dict[str, Any]]:

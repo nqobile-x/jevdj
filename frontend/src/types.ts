@@ -2,10 +2,12 @@ export type Vibe = "auto" | "warm-up" | "build" | "peak" | "cool-down";
 export type Phase = Exclude<Vibe, "auto">;
 export type TransitionStyle =
   | "long_blend" | "quick_cut" | "filter_fade" | "echo_out" | "wash_out" | "brake" | "loop_roll"
-  | "chop" | "tease" | "rewind";
+  | "chop" | "tease" | "rewind" | "log_drum_swap" | "word_play" | "double_drop" | "siren_spin" | "stem_mashup";
 export type MixStyle = "radio" | "club" | "quick";
 export type Flair = "smooth" | "creative" | "turnt";
 export type DeckId = "A" | "B";
+
+export type TrackSource = "audius" | "youtube" | "tiktok";
 
 export interface TrackSummary {
   id: number;
@@ -24,7 +26,7 @@ export interface TrackSummary {
   energy: number;
   intro_end: number;
   outro_start: number;
-  source?: "audius" | null;
+  source?: TrackSource | null;
   permalink?: string | null;
 }
 
@@ -68,6 +70,28 @@ export interface LearnedStyle {
   down: number;
   n: number;
   bonus: number;
+}
+
+export interface CrateProfile {
+  total_tracks: number;
+  local_tracks: number;
+  youtube_tracks: number;
+  audius_tracks: number;
+  bpm_clusters: { band: string; count: number }[];
+  top_keys: { camelot: string; count: number }[];
+  genres: { genre: string; count: number }[];
+  vocal_led_pct: number;
+  smooth_pair_pct: number;
+  top_pairs: {
+    from: string;
+    to: string;
+    bpm: string;
+    camelot: string;
+    style: string;
+    smoothness: number;
+    score: number;
+  }[];
+  summary: string;
 }
 
 export interface Decision {
@@ -124,7 +148,7 @@ export interface OrderItem {
 export interface OrderStatus {
   active: boolean;
   shape: OrderShape;
-  scope: "library" | "audius";
+  scope: "library" | "audius" | "stream";
   total: number;
   smooth_pct: number | null;
   items: OrderItem[];
@@ -132,6 +156,7 @@ export interface OrderStatus {
 
 export interface RadioStatus {
   active: boolean;
+  source?: "audius" | "stream";
   query: string | null;
   genre: string | null;
   ready: number;

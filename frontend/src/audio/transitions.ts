@@ -11,6 +11,7 @@ import type { Engine } from "./engine";
 export const STYLE_BARS: Record<TransitionStyle, number> = {
   long_blend: 32, quick_cut: 4, filter_fade: 16, echo_out: 8, wash_out: 8, brake: 2, loop_roll: 4,
   chop: 8, tease: 8, rewind: 2,
+  log_drum_swap: 16, word_play: 8, double_drop: 16, siren_spin: 2, stem_mashup: 16,
 };
 
 export interface ScheduledTransition {
@@ -31,10 +32,13 @@ export function incomingOffsetBars(style: TransitionStyle, bars: number): number
       return bars;
     case "brake":
     case "rewind":
+    case "siren_spin":
       return 1;
     case "echo_out":
     case "wash_out":
       return 2;
+    case "word_play":
+      return 4;
     default:
       return 0;
   }
@@ -64,8 +68,9 @@ export function scheduleTransition(
   bars: number,
   mixOutPos: number,
   mixInPos: number,
+  t0Override?: number,
 ): ScheduledTransition {
-  const t0 = out.timeAt(mixOutPos);
+  const t0 = t0Override ?? out.timeAt(mixOutPos);
   const bar = out.barLength();
   const inStart = t0 + incomingOffsetBars(style, bars) * bar;
   const end = t0 + bars * bar;
@@ -224,6 +229,123 @@ export function scheduleTransition(
       i.mix.setValueAtTime(1, inStart);
       break;
     }
+    case "log_drum_swap": {
+      // Amapiano / 3-Step signature: 8-bar percussion intro with bass killed, 2-bar high-pass tension fake-out, then slam the log drum at bar 8.
+      const swap = Math.floor(bars / 2);
+      i.mix.setValueAtTime(0, at(0));
+      i.mix.linearRampToValueAtTime(0.95, at(swap - 2));
+      i.low.setValueAtTime(KILL_DB, at(0));
+      i.high.setValueAtTime(-3, at(0));
+      i.high.linearRampToValueAtTime(0, at(swap));
+      // 2-bar fake-out tension before the log drum drops: high-pass outgoing, then slam incoming bass at `swap`
+      o.hp.setValueAtTime(10, at(swap - 2));
+      o.hp.exponentialRampToValueAtTime(750, at(swap) - 0.01);
+      o.low.setValueAtTime(0, at(swap - 1));
+      o.low.linearRampToValueAtTime(KILL_DB, at(swap));
+      i.low.setValueAtTime(KILL_DB, at(swap) - 0.02);
+      i.low.linearRampToValueAtTime(2.5, at(swap));
+      i.low.linearRampToValueAtTime(0, at(swap + 2));
+      i.mix.setValueAtTime(1, at(swap));
+      engine.riser(at(swap - 2), 2 * bar, 0.18);
+      out.echoDelay.delayTime.setValueAtTime((bar / 4) * 0.75, at(swap + 2));
+      o.send.setValueAtTime(0, at(swap + 2));
+      o.send.linearRampToValueAtTime(0.5, at(bars - 2));
+      o.mix.setValueAtTime(0.85, at(swap));
+      o.mix.linearRampToValueAtTime(0, at(bars));
+      break;
+    }
+    case "word_play": {
+      // Isolate outgoing vocal hook (kill bass, gentle HPF at 260 Hz) while teasing incoming stabs, then drop incoming at bar 4.
+      const beat = bar / 4;
+      const beatTrack = inc.beatPeriod;
+      o.low.setValueAtTime(0, at(0));
+      o.low.linearRampToValueAtTime(KILL_DB, at(1));
+      o.hp.setValueAtTime(10, at(0));
+      o.hp.exponentialRampToValueAtTime(260, at(2));
+      for (const [b, beats] of [[1, 2], [2.5, 2], [3.5, 2]] as [number, number][]) {
+        inc.scheduleSlice(at(b), mixInPos, beats * beatTrack);
+      }
+      i.mix.setValueAtTime(0, inStart - 0.01);
+      i.mix.linearRampToValueAtTime(1, inStart);
+      i.low.setValueAtTime(0, inStart);
+      out.echoDelay.delayTime.setValueAtTime(beat * 0.75, inStart);
+      o.send.setValueAtTime(0, inStart);
+      o.send.linearRampToValueAtTime(0.75, at(bars - 2));
+      o.fb.setValueAtTime(0.45, inStart);
+      o.fb.linearRampToValueAtTime(0, at(bars));
+      o.mix.setValueAtTime(0.8, inStart);
+      o.mix.linearRampToValueAtTime(0, at(bars));
+      break;
+    }
+    case "double_drop": {
+      // Festival double-drop: both tracks lock together for 16 bars, trading basslines every 2 bars before incoming takes full command.
+      i.mix.setValueAtTime(0, at(0));
+      i.mix.linearRampToValueAtTime(1, at(2));
+      i.low.setValueAtTime(KILL_DB, at(0));
+      for (let b = 2; b < bars - 4; b += 2) {
+        const incTurn = (b / 2) % 2 === 1;
+        o.low.setValueAtTime(incTurn ? 0 : KILL_DB, at(b) - 0.015);
+        o.low.linearRampToValueAtTime(incTurn ? KILL_DB : 0, at(b));
+        i.low.setValueAtTime(incTurn ? KILL_DB : 0, at(b) - 0.015);
+        i.low.linearRampToValueAtTime(incTurn ? 0 : KILL_DB, at(b));
+      }
+      o.low.setValueAtTime(KILL_DB, at(bars - 4));
+      i.low.setValueAtTime(0, at(bars - 4));
+      o.hp.setValueAtTime(10, at(bars - 4));
+      o.hp.exponentialRampToValueAtTime(1400, at(bars));
+      o.mix.setValueAtTime(1, at(bars - 4));
+      o.mix.linearRampToValueAtTime(0, at(bars));
+      break;
+    }
+    case "siren_spin": {
+      // Club reload / sound-system move: dub delay feedback swell + riser + fast spinback, then slam the new drop on bar 1.
+      const beat = bar / 4;
+      out.echoDelay.delayTime.setValueAtTime(beat * 0.375, at(0));
+      o.send.setValueAtTime(0.85, at(0));
+      o.fb.setValueAtTime(0.72, at(0));
+      o.hp.setValueAtTime(10, at(0));
+      o.hp.exponentialRampToValueAtTime(900, at(1) - 0.02);
+      engine.riser(at(0), bar, 0.26);
+      out.scheduleRewind(at(1) - 2 * beat, 2 * beat - 0.01, 3);
+      o.send.setValueAtTime(0.85, at(1) - 0.01);
+      o.send.linearRampToValueAtTime(0, at(1));
+      o.fb.linearRampToValueAtTime(0, at(bars));
+      o.mix.setValueAtTime(1, at(1) - 0.01);
+      o.mix.linearRampToValueAtTime(0, at(1) + beat);
+      i.mix.setValueAtTime(1, inStart);
+      break;
+    }
+    case "stem_mashup": {
+      // Live Acapella + Instrumental Mashup: isolate outgoing vocal (kill lows & highs, HPF at 320 Hz)
+      // while incoming brings its full sub-bass & groove underneath, then hand over the mids at bar 12.
+      const handoff = Math.max(8, bars - 4);
+      i.mix.setValueAtTime(0, at(0));
+      i.mix.linearRampToValueAtTime(1, at(2));
+      i.low.setValueAtTime(KILL_DB, at(0));
+      i.low.linearRampToValueAtTime(1.5, at(2)); // incoming owns the sub-bass & kick immediately
+      i.high.setValueAtTime(-3, at(0));
+      i.high.linearRampToValueAtTime(0, at(handoff));
+
+      // Outgoing becomes an isolated vocal stem (acapella) riding on top of incoming's beat
+      o.low.setValueAtTime(0, at(0));
+      o.low.linearRampToValueAtTime(KILL_DB, at(2));
+      o.hp.setValueAtTime(10, at(0));
+      o.hp.exponentialRampToValueAtTime(320, at(2));
+      o.high.setValueAtTime(0, at(0));
+      o.high.linearRampToValueAtTime(-10, at(2));
+
+      // At bar 12 (handoff), echo out the vocal stem and let incoming take 100% full spectrum
+      out.echoDelay.delayTime.setValueAtTime((bar / 4) * 0.75, at(handoff));
+      o.send.setValueAtTime(0, at(handoff));
+      o.send.linearRampToValueAtTime(0.65, at(bars - 1));
+      o.fb.setValueAtTime(0.42, at(handoff));
+      o.fb.linearRampToValueAtTime(0, at(bars));
+      i.low.setValueAtTime(1.5, at(handoff));
+      i.low.linearRampToValueAtTime(0, at(bars));
+      o.mix.setValueAtTime(0.92, at(handoff));
+      o.mix.linearRampToValueAtTime(0, at(bars));
+      break;
+    }
   }
 
   inc.play(inStart, mixInPos);
@@ -242,15 +364,17 @@ export function runPlan(
   mixOut: number,
   allowPre: boolean,
 ): ScheduledTransition {
+  let t0Override: number | undefined;
   if (plan.pre?.type === "run_it_back" && allowPre && Math.abs(mixOut - plan.mix_out_s) < 0.01) {
     // Spin back over the last 2 beats, hot-cue to the hook, play it again, then do the transition.
-    const t0 = out.timeAt(mixOut);
+    const tJump = out.timeAt(mixOut);
     const beat = out.barLength() / 4;
-    out.scheduleRewind(t0 - 2 * beat, 2 * beat - 0.01, 4);
-    out.scheduleJump(t0, plan.pre.jump_to_s);
+    out.scheduleRewind(tJump - 2 * beat, 2 * beat - 0.01, 4);
+    out.scheduleJump(tJump, plan.pre.jump_to_s);
     mixOut = plan.pre.jump_to_s + plan.pre.bars * 4 * out.beatPeriod;
+    t0Override = tJump + plan.pre.bars * out.barLength();
   } else if (plan.loop && mixOut <= plan.loop.start_s + 0.01) {
     out.setLoop(plan.loop.start_s, plan.loop.end_s);
   }
-  return scheduleTransition(engine, out, inc, plan.style, plan.bars, mixOut, plan.mix_in_s);
+  return scheduleTransition(engine, out, inc, plan.style, plan.bars, mixOut, plan.mix_in_s, t0Override);
 }

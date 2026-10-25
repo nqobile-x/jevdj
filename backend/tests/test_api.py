@@ -150,3 +150,20 @@ def test_switch_it_up_and_taste(tmp_path):
         assert "favourite genres: amapiano" in state["listener_taste"]
         v = c.post("/voice/line", json={"next_id": 2, "mode": "intro"}).json()
         assert v["text"] and v["source"] == "template"
+
+
+def test_brain_train_and_crate_profile(tmp_path):
+    c, _ = make_client(tmp_path, FakeJev(confidence=0.9))
+    with c:
+        res = c.post("/brain/train").json()
+        assert res["ok"] is True
+        prof = res["profile"]
+        assert prof["total_tracks"] == 5
+        assert prof["local_tracks"] == 5
+        assert prof["smooth_pair_pct"] > 0
+        assert len(prof["bpm_clusters"]) >= 1
+        assert len(prof["top_keys"]) >= 1
+        assert len(prof["top_pairs"]) >= 1
+        lrn = c.get("/learning").json()
+        assert "profile" in lrn and lrn["profile"]["total_tracks"] == 5
+        assert any(d["kind"] == "training" for d in c.get("/decisions").json())

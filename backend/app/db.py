@@ -93,7 +93,12 @@ class Database:
         self._lock = threading.RLock()
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
+        try:
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA synchronous=NORMAL")
+            self._conn.execute("PRAGMA temp_store=MEMORY")
+        except sqlite3.OperationalError:
+            self._conn.execute("PRAGMA journal_mode=MEMORY")
         self._conn.executescript(SCHEMA)
         have = {r[1] for r in self._conn.execute("PRAGMA table_info(tracks)")}
         for col, typ in _MIGRATIONS.items():
@@ -306,3 +311,117 @@ class Database:
 
     def reset_learning(self) -> None:
         self._exec("DELETE FROM feedback")
+
+    # ------------------------------------------------------------ DJ crate training (local + YouTube/Audius)
+
+    def train_crate_profile(self) -> dict[str, Any]:
+        """Scan all analysed local, YouTube/TikTok, and Audius tracks in SQLite to build a
+        comprehensive Trained DJ Crate Profile: BPM sweet spots, Camelot key centres,
+        vocal vs instrumental balance, harmonic pair matrix, and synthetic style priors."""
+        from app.brain import rules
+
+        tracks = [t for t in self.get_tracks_full() if t.get("bpm") and (t.get("duration") or 0) <= rules.MAX_TRACK_SECONDS]
+        if not tracks:
+            return {
+                "total_tracks": 0, "local_tracks": 0, "youtube_tracks": 0, "audius_tracks": 0,
+                "bpm_clusters": [], "top_keys": [], "genres": [], "vocal_led_pct": 0,
+                "smooth_pair_pct": 0, "top_pairs": [], "trained_styles": {}, "summary": "no analysed tracks yet",
+            }
+
+        local_n = sum(1 for t in tracks if not t.get("source"))
+        yt_n = sum(1 for t in tracks if t.get("source") in ("youtube", "tiktok"))
+        audius_n = sum(1 for t in tracks if t.get("source") == "audius")
+
+        # 1. Dominant BPM clusters (rounded to 4-BPM bands)
+        bpm_bands: dict[str, int] = {}
+        for t in tracks:
+            b = int(round(float(t["bpm"]) / 4.0) * 4)
+            label = f"{b - 2}-{b + 2} BPM"
+            bpm_bands[label] = bpm_bands.get(label, 0) + 1
+        top_bpms = sorted(bpm_bands.items(), key=lambda kv: -kv[1])[:4]
+
+        # 2. Dominant Camelot keys & Genres
+        key_counts: dict[str, int] = {}
+        genre_counts: dict[str, int] = {}
+        vocal_led = 0
+        for t in tracks:
+            cam = str(t.get("camelot") or "")
+            if cam:
+                key_counts[cam] = key_counts.get(cam, 0) + 1
+            g = str(t.get("genre") or "").strip().lower()
+            if g:
+                genre_counts[g] = genre_counts.get(g, 0) + 1
+            vb = t.get("vocal_bars") or []
+            if vb and (sum(vb) / len(vb)) > 0.42:
+                vocal_led += 1
+        top_keys = sorted(key_counts.items(), key=lambda kv: -kv[1])[:5]
+        top_genres = sorted(genre_counts.items(), key=lambda kv: -kv[1])[:5]
+        vocal_pct = round(100 * vocal_led / len(tracks))
+
+        # 3. Pairwise harmonic + BPM compatibility matrix & best transition moves
+        smooth_pairs = 0
+        total_pairs = 0
+        best_pairs: list[tuple[float, dict[str, Any]]] = []
+        style_Suitability: dict[str, int] = {}
+
+        sample = tracks[:45]  # cap O(N^2) so training finishes in <50ms
+        for i, a in enumerate(sample):
+            for j, b in enumerate(sample):
+                if i == j:
+                    continue
+                total_pairs += 1
+                sm = rules.transition_smoothness(a, b)
+                if sm >= 2:
+                    smooth_pairs += 1
+                score = rules.rule_score(a, b, "build")
+                opts = rules.style_options(a, b, "build", "club", "creative")
+                best_style = opts[0] if opts else "long_blend"
+                if sm >= 2:
+                    style_Suitability[best_style] = style_Suitability.get(best_style, 0) + 1
+                if len(best_pairs) < 12 or score > best_pairs[-1][0]:
+                    best_pairs.append((score, {
+                        "from": f"{a.get('artist') or ''} - {a.get('title') or ''}".strip(" -"),
+                        "to": f"{b.get('artist') or ''} - {b.get('title') or ''}".strip(" -"),
+                        "bpm": f"{a['bpm']:.0f}->{b['bpm']:.0f}",
+                        "camelot": f"{a.get('camelot')}->{b.get('camelot')}",
+                        "style": best_style,
+                        "smoothness": sm,
+                        "score": round(score, 3),
+                    }))
+                    best_pairs.sort(key=lambda x: -x[0])
+                    best_pairs = best_pairs[:8]
+
+        smooth_pct = round(100 * smooth_pairs / max(total_pairs, 1))
+
+        # 4. Seed gentle positive feedback priors for styles that naturally fit the user's crate
+        # if the user hasn't explicitly rated those styles yet
+        existing_learned = self.learned_styles()
+        set_id = self.latest_set()
+        top_natural_styles = sorted(style_Suitability.items(), key=lambda kv: -kv[1])[:5]
+        for st, count in top_natural_styles:
+            if st not in existing_learned and count >= 2:
+                self.add_feedback(set_id, "transition", 0.5, st, None, "crate training prior")
+
+        summary = (
+            f"Trained on {len(tracks)} tracks ({local_n} local, {yt_n} YouTube/TikTok, {audius_n} Audius): "
+            f"BPM clusters {', '.join(f'{k} ({v})' for k, v in top_bpms[:3])}; "
+            f"key centres {', '.join(f'{k} ({v})' for k, v in top_keys[:4])}; "
+            f"genres {', '.join(f'{k} ({v})' for k, v in top_genres[:4])}; "
+            f"{vocal_pct}% vocal-led ({100 - vocal_pct}% instrumental groove); "
+            f"{smooth_pct}% of track pairs have smooth/seamless harmonic + BPM transitions."
+        )
+        return {
+            "total_tracks": len(tracks),
+            "local_tracks": local_n,
+            "youtube_tracks": yt_n,
+            "audius_tracks": audius_n,
+            "bpm_clusters": [{"band": k, "count": v} for k, v in top_bpms],
+            "top_keys": [{"camelot": k, "count": v} for k, v in top_keys],
+            "genres": [{"genre": k, "count": v} for k, v in top_genres],
+            "vocal_led_pct": vocal_pct,
+            "smooth_pair_pct": smooth_pct,
+            "top_pairs": [p for _s, p in best_pairs[:6]],
+            "trained_styles": self.learned_styles(),
+            "summary": summary,
+        }
+

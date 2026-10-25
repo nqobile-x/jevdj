@@ -10,6 +10,7 @@ import type { DeckId, Flair, MixStyle, NextResponse, TrackSummary, TransitionPla
 import type { Deck } from "./deck";
 import type { Engine } from "./engine";
 import { prelisten, type PrelistenReport } from "./prelisten";
+import type { Soundboard } from "./soundboard";
 import { STYLE_BARS, runPlan, scheduleTransition, syncRate, type ScheduledTransition } from "./transitions";
 
 type Status = "off" | "starting" | "choosing" | "loading" | "ready" | "mixing" | "error";
@@ -48,6 +49,7 @@ export class AutoDJ {
     lastVoice: null, history: [],
   });
   private timer: number | null = null;
+  private finishTimer: number | null = null;
   private busy = false;
   private excluded: number[] = [];
   private tracksSinceVoice = 0;
@@ -55,13 +57,20 @@ export class AutoDJ {
   private generation = 0; // bumps on every re-plan so stale async results are ignored
   private ramping = false; // outgoing deck is being ramped toward the incoming tempo
   private startedAt: Record<DeckId, number> = { A: 0, B: 0 }; // where each deck's track started playing
+  private statusSince = Date.now();
+  private preMixFxFired = false;
 
-  constructor(private engine: Engine, private decks: Record<DeckId, Deck>) {
+  constructor(private engine: Engine, private decks: Record<DeckId, Deck>, private soundboard?: Soundboard) {
     for (const d of Object.values(decks)) d.onEnded = () => this.onDeckEnded(d);
   }
 
   get s(): AutoState {
     return this.store.get();
+  }
+
+  private setStatus(status: Status, extra: Partial<AutoState> = {}): void {
+    this.statusSince = Date.now();
+    this.store.set({ status, ...extra });
   }
 
   private liveDeck(): Deck | null {
@@ -76,7 +85,7 @@ export class AutoDJ {
 
   async enable(): Promise<void> {
     await this.engine.resume();
-    this.store.set({ enabled: true, status: "starting", message: "" });
+    this.setStatus("starting", { enabled: true, message: "" });
     if (this.timer === null) this.timer = window.setInterval(() => this.tick(), TICK_MS);
     try {
       const live = (["A", "B"] as DeckId[]).find((id) => this.decks[id].playing) ?? null;
@@ -96,8 +105,10 @@ export class AutoDJ {
   disable(): void {
     this.generation++;
     if (this.timer !== null) clearInterval(this.timer);
+    if (this.finishTimer !== null) clearTimeout(this.finishTimer);
     this.timer = null;
-    this.store.set({ enabled: false, status: "off", next: null, plan: null, barsToMix: null, scheduled: null });
+    this.finishTimer = null;
+    this.setStatus("off", { enabled: false, next: null, plan: null, barsToMix: null, scheduled: null });
   }
 
   async setFlair(flair: Flair): Promise<void> {
@@ -188,7 +199,7 @@ export class AutoDJ {
     await this.prepareNext();
   }
 
-  /** The source changed (library <-> Audius station): re-pick the next track from the new pool. */
+  /** The source changed (library <-> Audius / YouTube station): re-pick the next track from the new pool. */
   async replan(): Promise<void> {
     if (!this.s.enabled || this.s.status === "mixing" || !this.liveDeck()?.track) return;
     await this.prepareNext();
@@ -220,7 +231,7 @@ export class AutoDJ {
     const live = this.liveDeck();
     const inc = this.idleDeck();
     try {
-      this.store.set({ status: "loading", message: "loading your pick", nextManual: true });
+      this.setStatus("loading", { message: "loading your pick", nextManual: true });
       await api.override("manual_next", trackId, "user picked the next track");
       const detail = await inc.load(trackId);
       if (gen !== this.generation) return;
@@ -230,7 +241,7 @@ export class AutoDJ {
         track: detail, source: "rules", confidence: null, reason: "picked by you", fallback: null,
         decision_ids: [], phase: this.s.next?.phase ?? "build", candidates: 0,
       };
-      this.store.set({ next, plan, status: "ready", message: "" });
+      this.setStatus("ready", { next, plan, message: "" });
       void this.earsCheck(gen);
       this.prefetchVoice(detail);
     } catch (e) {
@@ -238,15 +249,68 @@ export class AutoDJ {
     }
   }
 
+  /** Smoothly mix into a chosen track right now (works whether AUTO is on or off).
+   *  Uses Jev's transition brain + pre-listen loudness/beat alignment so songs are never thrown in raw! */
+  async mixInTrack(trackId: number): Promise<string | null> {
+    await this.engine.resume();
+    if (this.s.status === "mixing") return null;
+    if (this.timer === null) this.timer = window.setInterval(() => this.tick(), TICK_MS);
+    const liveId = this.s.live ?? (this.decks.A.playing ? "A" : this.decks.B.playing ? "B" : null);
+    if (!liveId || !this.decks[liveId].playing || !this.decks[liveId].track) {
+      // Nothing playing yet: start this track cleanly on Deck A and turn on AUTO so the set keeps flowing
+      const gen = ++this.generation;
+      this.setStatus("loading", { enabled: true, message: "starting your track..." });
+      await api.startSet(this.s.vibe).catch(() => undefined);
+      const deck = this.decks.A;
+      const detail = await deck.load(trackId);
+      if (gen !== this.generation) return null;
+      deck.resetAutomation();
+      deck.play(this.engine.now + 0.08, detail.first_downbeat || 0);
+      this.startedAt[deck.id] = detail.first_downbeat || 0;
+      const next: NextResponse = {
+        track: detail, source: "rules", confidence: null, reason: "started by you", fallback: null,
+        decision_ids: [], phase: "build", candidates: 0,
+      };
+      this.store.set({ enabled: true, live: deck.id, next });
+      await this.onTrackStarted(deck, "opener", "user");
+      return "OPENER";
+    }
+    if (this.decks[liveId].track?.id === trackId) return null;
+    this.store.set({ enabled: true, live: liveId });
+    await this.manualNext(trackId);
+    if (this.s.status === "ready" && this.s.plan) {
+      const out = this.liveDeck();
+      const inc = this.idleDeck();
+      if (out?.buffer && out.track && inc.buffer && inc.track) {
+        try {
+          const checked = await prelisten({
+            outBuf: out.buffer, outTrack: out.track, outRate: out.rate,
+            inBuf: inc.buffer, inTrack: inc.track, plan: this.s.plan,
+          });
+          if (checked.report.inGain !== 1) {
+            inc.setGain(Math.min(1.5, Math.max(0.3, inc.state.gain * checked.report.inGain)));
+          }
+          this.store.set({ plan: checked.plan, ears: { status: "done", report: checked.report } });
+        } catch {
+          /* prelisten optional */
+        }
+      }
+      const usedStyle = this.s.plan.style;
+      await this.mixNow();
+      return usedStyle;
+    }
+    return null;
+  }
+
   // ---------------------------------------------------------------- flow
 
   private async startFresh(): Promise<void> {
     const gen = ++this.generation;
-    this.store.set({ status: "choosing", message: "picking an opener" });
+    this.setStatus("choosing", { message: "picking an opener" });
     const next = await api.next({ current_id: null, history: this.s.history, vibe: this.s.vibe });
     if (gen !== this.generation) return;
     const deck = this.decks.A.playing ? this.decks.B : this.decks.A;
-    this.store.set({ status: "loading", message: `loading ${next.track.title}` });
+    this.setStatus("loading", { message: `loading ${next.track.title}` });
     const detail = await deck.load(next.track.id);
     if (gen !== this.generation) return;
     deck.resetAutomation();
@@ -279,15 +343,15 @@ export class AutoDJ {
     const inc = this.idleDeck();
     this.ramping = false; // a new plan cancels any tempo ramp in progress
     try {
-      this.store.set({
-        status: "choosing", message: switchUp ? "switching it up" : "Jev is choosing",
+      this.setStatus("choosing", {
+        message: switchUp ? "switching it up" : "Jev is choosing",
         next: null, plan: null, nextManual: false, voiceLine: null,
       });
       const next = await api.next({
         current_id: live.track.id, history: this.s.history, vibe: this.s.vibe, exclude: this.excluded, switch: switchUp,
       });
       if (gen !== this.generation) return;
-      this.store.set({ next, status: "loading", message: "planning transition" });
+      this.setStatus("loading", { next, message: "planning transition" });
       const LOAD_LIMIT_MS = 45_000; // a track that won't load in time is skipped: the music must not stall
       const loaded = Promise.race([
         inc.load(next.track.id),
@@ -307,8 +371,14 @@ export class AutoDJ {
         throw e;
       }
       if (gen !== this.generation) return;
+      // Ensure mix_out_s has not already passed while loading/analysing the next track
+      const minMixOut = live.position() + 4 * live.barLength() * live.rate;
+      if (plan.mix_out_s < minMixOut && minMixOut < live.state.duration - 8) {
+        plan = { ...plan, mix_out_s: live.nextDownbeat(minMixOut) };
+      }
       inc.setGain(1); // a fresh track starts at unity gain; the pre-listen matches loudness
-      this.store.set({ plan, status: "ready", message: "" });
+      this.preMixFxFired = false;
+      this.setStatus("ready", { plan, message: "" });
       void this.earsCheck(gen);
       this.prefetchVoice(next.track, switchUp ? "switch" : "next", switchUp);
     } catch (e) {
@@ -327,13 +397,39 @@ export class AutoDJ {
   private tick(): void {
     const live = this.liveDeck();
     const s = this.s;
-    if (!s.enabled || !live) return;
+    if (!s.enabled) return;
 
-    if (s.status === "mixing" && s.scheduled) {
-      const p = (this.engine.now - s.scheduled.t0) / (s.scheduled.end - s.scheduled.t0);
-      this.store.set({ mixProgress: Math.min(1, Math.max(0, p)), barsToMix: null });
+    // Watchdog 1: If no deck is playing and we aren't actively loading/mixing, wake up immediately
+    if (!live || (!live.playing && s.status !== "mixing" && s.status !== "loading" && s.status !== "starting")) {
+      if (Date.now() - this.statusSince > 2500) {
+        const inc = this.idleDeck();
+        if (inc.playing) {
+          this.store.set({ live: inc.id });
+          void this.prepareNext();
+        } else {
+          void this.startFresh().catch((e) => this.fail(e));
+        }
+      }
       return;
     }
+
+    // Watchdog 2: Check transition completion directly against Web Audio clock (immune to background tab throttling)
+    if (s.status === "mixing" && s.scheduled) {
+      const p = (this.engine.now - s.scheduled.t0) / Math.max(0.1, s.scheduled.end - s.scheduled.t0);
+      this.store.set({ mixProgress: Math.min(1, Math.max(0, p)), barsToMix: null });
+      if (this.engine.now >= s.scheduled.end + 0.05 && s.plan) {
+        const inc = this.idleDeck();
+        this.finishTransition(live, inc, s.plan);
+      }
+      return;
+    }
+
+    // Watchdog 3: If stuck in choosing/error while live deck is playing, retry before the track runs out
+    if ((s.status === "choosing" || s.status === "error") && Date.now() - this.statusSince > 15_000) {
+      void this.prepareNext();
+      return;
+    }
+
     if (s.editArmed && live.playing && s.status === "ready") {
       const edit = s.editArmed;
       const pos = live.position();
@@ -350,7 +446,18 @@ export class AutoDJ {
     if (s.status === "ready" && s.plan && live.playing) {
       const pos = live.position();
       const barLen = live.barLength() * live.rate;
-      this.store.set({ barsToMix: Math.max(0, (s.plan.mix_out_s - pos) / barLen) });
+      const barsToMix = Math.max(0, (s.plan.mix_out_s - pos) / barLen);
+      this.store.set({ barsToMix });
+      if (!this.preMixFxFired && barsToMix <= 4.2 && barsToMix >= 2.5) {
+        this.preMixFxFired = true;
+        this.soundboard?.maybeAutoTrigger({
+          barsToMix,
+          phase: s.next?.phase ?? "build",
+          flair: s.flair,
+          style: s.plan.style,
+          moment: "pre_mix",
+        });
+      }
       const secondsLeft = (s.plan.mix_out_s - pos) / live.rate;
       const ramp = s.plan.tempo_ramp;
       if (ramp && !this.ramping && secondsLeft <= ramp.bars * live.barLength() + LOOKAHEAD_S + 1) {
@@ -364,7 +471,7 @@ export class AutoDJ {
     const out = this.liveDeck();
     const inc = this.idleDeck();
     const plan = this.s.plan;
-    if (!out?.track || !inc.track || !plan || this.busy) return;
+    if (!out?.track || !inc.track || !plan || this.busy || this.s.status === "mixing") return;
     this.busy = true;
     try {
       let mixOut = plan.mix_out_s;
@@ -374,16 +481,22 @@ export class AutoDJ {
       }
       const sched = runPlan(this.engine, out, inc, plan, mixOut, !forceSoon);
       this.startedAt[inc.id] = plan.mix_in_s;
-      this.store.set({ status: "mixing", scheduled: sched, mixProgress: 0, barsToMix: 0 });
+      this.setStatus("mixing", { scheduled: sched, mixProgress: 0, barsToMix: 0 });
       this.scheduleVoice(sched);
+      if (this.finishTimer !== null) clearTimeout(this.finishTimer);
       const waitMs = Math.max(0, (sched.end - this.engine.now) * 1000) + 60;
-      window.setTimeout(() => this.finishTransition(out, inc, plan), waitMs);
+      this.finishTimer = window.setTimeout(() => this.finishTransition(out, inc, plan), waitMs);
     } finally {
       this.busy = false;
     }
   }
 
   private finishTransition(out: Deck, inc: Deck, plan: TransitionPlan): void {
+    if (this.s.status !== "mixing") return; // guard against double-call from timer + tick watchdog
+    if (this.finishTimer !== null) {
+      clearTimeout(this.finishTimer);
+      this.finishTimer = null;
+    }
     this.ramping = false;
     this.store.set({
       lastMix: { style: plan.style, into: inc.track?.title ?? "", rated: null },
@@ -392,8 +505,19 @@ export class AutoDJ {
     });
     out.stop();
     out.resetAutomation();
+    // Safety guarantee: if incoming deck stopped or wasn't playing yet, start it immediately so music never dies
+    if (!inc.playing && inc.buffer) {
+      inc.play(this.engine.now, Math.max(0, plan.mix_in_s));
+    }
     const source = this.s.nextManual ? "user" : this.s.next?.source ?? null;
-    this.store.set({ live: inc.id, scheduled: null, mixProgress: null, status: "choosing" });
+    this.setStatus("choosing", { live: inc.id, scheduled: null, mixProgress: null });
+    this.soundboard?.maybeAutoTrigger({
+      barsToMix: 0,
+      phase: this.s.next?.phase ?? "build",
+      flair: this.s.flair,
+      style: plan.style,
+      moment: "drop_hit",
+    });
     this.easeTempoHome(inc);
     void this.onTrackStarted(inc, plan.style, source);
   }
@@ -493,29 +617,38 @@ export class AutoDJ {
 
   private onDeckEnded(deck: Deck): void {
     // Safety net: never leave silence. If the live deck ran out without a transition, go now.
-    if (!this.s.enabled || deck.id !== this.s.live || this.s.status === "mixing") return;
+    if (!this.s.enabled || deck.id !== this.s.live) return;
     const inc = this.idleDeck();
-    if (inc.track && this.s.next) {
+    if (this.s.status === "mixing" && this.s.plan) {
+      // Outgoing track finished slightly before sched.end: complete the transition immediately
+      this.finishTransition(deck, inc, this.s.plan);
+      return;
+    }
+    if (inc.track && inc.buffer) {
+      inc.resetAutomation();
       inc.setRate(syncRate(deck, inc));
-      inc.play(this.engine.now + 0.05, this.s.plan?.mix_in_s ?? inc.track.first_downbeat);
-      this.startedAt[inc.id] = this.s.plan?.mix_in_s ?? inc.track.first_downbeat;
+      const startOffset = this.s.plan?.mix_in_s ?? inc.track.first_downbeat ?? 0;
+      inc.play(this.engine.now + 0.05, startOffset);
+      this.startedAt[inc.id] = startOffset;
       this.store.set({ live: inc.id });
-      void this.onTrackStarted(inc, "emergency_cut", this.s.next.source);
+      void this.onTrackStarted(inc, "emergency_cut", this.s.next?.source ?? "rules");
     } else {
       void this.startFresh().catch((e) => this.fail(e));
     }
   }
 
   private fail(e: unknown): void {
-    const msg = e instanceof Error ? e.message : String(e);
-    this.store.set({ status: "error", message: msg });
-    // Retry in a few seconds; the live track keeps playing meanwhile.
+    const raw = e instanceof Error ? e.message : String(e);
+    const isWarming = /warming up|409/i.test(raw);
+    const msg = isWarming ? "warming up station - preparing next track..." : raw;
+    this.setStatus(isWarming ? "choosing" : "error", { message: msg });
+    const delay = isWarming ? 4000 : 2500;
     setTimeout(() => {
-      if (this.s.enabled && this.s.status === "error") {
+      if (this.s.enabled && (this.s.status === "error" || (this.s.status === "choosing" && this.s.message === msg))) {
         if (this.liveDeck()?.playing) void this.prepareNext();
         else void this.startFresh().catch((err) => this.fail(err));
       }
-    }, 5000);
+    }, delay);
   }
 }
 

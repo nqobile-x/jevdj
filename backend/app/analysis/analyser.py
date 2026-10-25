@@ -237,6 +237,66 @@ def per_bar(values: np.ndarray, downbeats: np.ndarray, duration: float, sr: int)
     return np.array(out)
 
 
+def infer_genre(
+    bpm: float,
+    energy: float,
+    perc_ratio: float,
+    vocal_mean: float,
+    low_ratio: float,
+    title: str = "",
+    artist: str = "",
+) -> str:
+    """Infer SA & international club genre when file/stream tags are missing or generic ('youtube', 'tiktok')."""
+    blob = f"{title} {artist}".lower()
+    for kw, g in (
+        ("amapiano", "amapiano"),
+        ("sgija", "amapiano"),
+        ("bacardi", "amapiano"),
+        ("3 step", "3-step"),
+        ("3-step", "3-step"),
+        ("gqom", "gqom"),
+        ("afro tech", "afro house"),
+        ("afro house", "afro house"),
+        ("afrobeats", "afrobeats"),
+        ("deep house", "deep house"),
+        ("hip hop", "hip hop"),
+        ("drill", "hip hop"),
+        ("r&b", "r&b"),
+        ("kabza", "amapiano"),
+        ("maphorisa", "amapiano"),
+        ("kelvin momo", "amapiano"),
+        ("uncle waffles", "amapiano"),
+        ("tyler icu", "amapiano"),
+        ("mellow & sleazy", "amapiano"),
+        ("focalistic", "amapiano"),
+        ("de mthuda", "amapiano"),
+        ("black coffee", "afro house"),
+        ("shimza", "afro house"),
+        ("culoe", "afro house"),
+        ("oscar mbo", "deep house"),
+        ("dlala thukzin", "3-step"),
+    ):
+        if kw in blob:
+            return g
+
+    # Acoustic fingerprint classification by tempo, sub-bass ratio, percussive drive, and vocal density
+    if 109.0 <= bpm <= 116.5:
+        if low_ratio >= 0.34 or perc_ratio >= 0.28:
+            return "amapiano"
+        return "deep house" if vocal_mean < 0.45 else "afrobeats"
+    if 116.5 < bpm <= 122.5:
+        return "3-step" if perc_ratio >= 0.38 else "afro house" if low_ratio >= 0.32 else "deep house"
+    if 122.5 < bpm <= 129.0:
+        return "gqom" if (perc_ratio >= 0.42 and energy >= 0.68) else "house"
+    if 129.0 < bpm <= 138.0:
+        return "tech house"
+    if 86.0 <= bpm < 109.0:
+        return "afrobeats" if (98.0 <= bpm <= 108.5 and perc_ratio >= 0.3) else "hip hop" if vocal_mean >= 0.42 else "r&b"
+    if bpm > 138.0:
+        return "hip hop" if vocal_mean >= 0.4 else "electronic"
+    return "dance"
+
+
 def mix_windows(vocal: np.ndarray, downbeats: np.ndarray, duration: float) -> tuple[float, float]:
     """intro_end: last phrase boundary before vocals arrive. outro_start: first phrase after they stop."""
     n = len(vocal)
@@ -339,7 +399,15 @@ def analyse_file(path: str | os.PathLike) -> TrackAnalysis:
         path=path,
         title=tags["title"],
         artist=tags["artist"],
-        genre=tags["genre"],
+        genre=tags["genre"] or infer_genre(
+            bpm=bpm,
+            energy=energy,
+            perc_ratio=perc_ratio,
+            vocal_mean=float(np.mean(vocal_bars)) if len(vocal_bars) else 0.0,
+            low_ratio=float(np.sum(mag_p[low_band]) / (np.sum(mag_p) + 1e-9)),
+            title=tags["title"],
+            artist=tags["artist"],
+        ),
         duration=round(duration, 3),
         bpm=round(bpm, 2),
         beat_period=period,

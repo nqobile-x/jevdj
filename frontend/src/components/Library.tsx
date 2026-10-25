@@ -3,6 +3,9 @@ import type { OrderShape, OrderStatus, TrackSummary } from "../types";
 import { AudiusPanel, type SourceStatus } from "./AudiusPanel";
 import { fmtTime } from "./DeckView";
 import { OrderStrip } from "./OrderStrip";
+import { StreamPanel } from "./StreamPanel";
+
+export type LibraryTab = "mine" | "audius" | "stream";
 
 interface Props {
   tracks: TrackSummary[];
@@ -13,14 +16,15 @@ interface Props {
   musicDir: string;
   onScan: (force: boolean) => void;
   onLoad: (trackId: number) => void;
+  onMixIn: (trackId: number) => void;
   onAddFiles: (files: File[]) => void;
   onOpenFolder: () => void;
   upload: number | null; // 0..1 while uploading
   broken: { title: string; error: string }[];
   sourceStatus: SourceStatus;
   onError: (msg: string) => void;
-  onTab: (tab: "mine" | "audius") => void;
-  onStation: (query: string | null, genre: string | null) => void;
+  onTab: (tab: LibraryTab) => void;
+  onStation: (query: string | null, genre: string | null, source?: "audius" | "stream") => void;
   order: OrderStatus | null;
   onOrder: (active: boolean, shape?: OrderShape) => void;
 }
@@ -42,14 +46,15 @@ export function Library(p: Props) {
   const picker = useRef<HTMLInputElement>(null);
   const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>({ key: "artist", dir: 1 });
   const [matchOnly, setMatchOnly] = useState(false);
-  const [tab, setTab] = useState<"mine" | "audius">("mine");
+  const [tab, setTab] = useState<LibraryTab>("mine");
   const ordered = !!p.order?.active;
   const planPos = useMemo(() => new Map((p.order?.active ? p.order.items : []).map((i) => [i.id, i])), [p.order]);
   const byId = useMemo(() => new Map(tracks.map((t) => [t.id, t])), [tracks]);
+  const localTracks = useMemo(() => tracks.filter((t) => !t.source), [tracks]);
 
   const rows = useMemo(() => {
     const needle = q.trim().toLowerCase();
-    let list = tracks.filter((t) =>
+    let list = localTracks.filter((t) =>
       !needle || `${t.artist} ${t.title} ${t.genre} ${t.camelot} ${Math.round(t.bpm)}`.toLowerCase().includes(needle));
     if (matchOnly && refCamelot && refBpm) {
       list = list.filter((t) => camelotDist(refCamelot, t.camelot) <= 1 && Math.abs(t.bpm / refBpm - 1) <= 0.08);
@@ -65,7 +70,7 @@ export function Library(p: Props) {
       if (sort.key === "camelot") return (parseInt(va as string) - parseInt(vb as string) || String(va).localeCompare(String(vb))) * sort.dir;
       return (typeof va === "number" ? (va as number) - (vb as number) : String(va).localeCompare(String(vb))) * sort.dir;
     });
-  }, [tracks, q, sort, matchOnly, refCamelot, refBpm, ordered, planPos]);
+  }, [localTracks, q, sort, matchOnly, refCamelot, refBpm, ordered, planPos]);
 
   const th = (key: SortKey, label: string, cls = "") => (
     <th className={cls} onClick={() => setSort((s) => ({ key, dir: s.key === key ? (-s.dir as 1 | -1) : 1 }))}>
@@ -101,17 +106,21 @@ export function Library(p: Props) {
       />
       <header className="panel-head">
         <span className="tabs">
-          <button className={`tab ${tab === "mine" ? "on" : ""}`} onClick={() => { setTab("mine"); p.onTab("mine"); }}
-            title="AUTO mixes your own music">LIBRARY</button>
-          <button className={`tab ${tab === "audius" ? "on" : ""}`} onClick={() => { setTab("audius"); p.onTab("audius"); }}
+          <button className={`tab tab-mine ${tab === "mine" ? "on" : ""}`} onClick={() => { setTab("mine"); p.onTab("mine"); }}
+            title="AUTO mixes your own local music">LIBRARY</button>
+          <button className={`tab tab-audius ${tab === "audius" ? "on" : ""}`} onClick={() => { setTab("audius"); p.onTab("audius"); }}
             title="AUTO mixes Audius tracks from your search (free, legal, artist-uploaded)">AUDIUS</button>
+          <button className={`tab tab-stream ${tab === "stream" ? "on" : ""}`} onClick={() => { setTab("stream"); p.onTab("stream"); }}
+            title="Search YouTube Music (Amapiano, R&B, Afro House) or paste YouTube / TikTok links">YOUTUBE / TIKTOK</button>
         </span>
         <button className={`btn small order-btn ${ordered ? "on" : ""}`} onClick={() => p.onOrder(!ordered)}
           title="Arrange the whole set: energy arc + smooth key/tempo neighbours. AUTO plays it in order">
           {ordered ? "● SMART ORDER" : "SMART ORDER"}
         </button>
-        {tab === "audius" ? <span className="dim">AUTO mixes from this search - pick a genre or search an artist</span> : <>
-        <span className="mono dim">{rows.length}/{tracks.length}</span>
+        {tab === "audius" ? <span className="dim">AUTO mixes from Audius - pick a genre or search an artist</span>
+          : tab === "stream" ? <span className="dim">Search YouTube Music or paste a YouTube / TikTok URL to mix</span>
+          : <>
+        <span className="mono dim">{rows.length}/{localTracks.length}</span>
         <input className="search" placeholder="search artist, title, key, bpm..." value={q} onChange={(e) => setQ(e.target.value)} />
         <label className="chk" title="Only tracks that mix harmonically with the live deck">
           <input type="checkbox" checked={matchOnly} onChange={(e) => setMatchOnly(e.target.checked)} /> MATCH
@@ -135,12 +144,13 @@ export function Library(p: Props) {
       {ordered && p.order && (
         <OrderStrip order={p.order} tracks={byId} playingIds={playingIds} onShape={(s) => p.onOrder(true, s)} />
       )}
-      {tab === "audius" && <AudiusPanel status={p.sourceStatus} onLoad={onLoad} onError={p.onError} onStation={p.onStation} refCamelot={refCamelot} />}
+      {tab === "audius" && <AudiusPanel status={p.sourceStatus} onLoad={onLoad} onMixIn={p.onMixIn} onError={p.onError} onStation={(q, g) => p.onStation(q, g, "audius")} refCamelot={refCamelot} refBpm={refBpm} />}
+      {tab === "stream" && <StreamPanel status={p.sourceStatus} onLoad={onLoad} onMixIn={p.onMixIn} onError={p.onError} onStation={(q, g, src) => p.onStation(q, g, src)} refCamelot={refCamelot} refBpm={refBpm} />}
       {tab === "mine" && scan?.running && (
         <div className="scanbar"><div style={{ width: `${scan.total ? (scan.done / scan.total) * 100 : 0}%` }} /><span>{scan.current}</span></div>
       )}
       {tab === "mine" && <div className="table-wrap">
-        {tracks.length === 0 ? (
+        {localTracks.length === 0 ? (
           <div className="empty">
             <p>No tracks analysed yet.</p>
             <p className="dim">MUSIC_DIR = <span className="mono">{musicDir || "?"}</span></p>
@@ -149,7 +159,7 @@ export function Library(p: Props) {
         ) : (
           <table>
             <thead>
-              <tr>{ordered && <th className="num">#</th>}{th("artist", "ARTIST")}{th("title", "TITLE")}{th("bpm", "BPM", "num")}{th("camelot", "KEY", "num")}{th("energy", "ENERGY", "num")}{th("duration", "TIME", "num")}{th("genre", "GENRE")}</tr>
+              <tr>{ordered && <th className="num">#</th>}{th("artist", "ARTIST")}{th("title", "TITLE")}{th("bpm", "BPM", "num")}{th("camelot", "KEY", "num")}{th("energy", "ENERGY", "num")}{th("duration", "TIME", "num")}{th("genre", "GENRE")}<th /></tr>
             </thead>
             <tbody>
               {rows.map((t) => {
@@ -164,8 +174,8 @@ export function Library(p: Props) {
                       e.dataTransfer.setData("text/jevdj-track", String(t.id));
                       e.dataTransfer.effectAllowed = "copy";
                     }}
-                    onDoubleClick={() => onLoad(t.id)}
-                    title="Drag to a deck, or double-click to load the idle deck"
+                    onDoubleClick={() => p.onMixIn(t.id)}
+                    title="Drag to a deck, or double-click to smoothly mix in"
                   >
                     {ordered && (
                       <td className="num mono dim">
@@ -175,16 +185,20 @@ export function Library(p: Props) {
                     <td>{t.artist}</td>
                     <td className="t-title">
                       {t.title}
-                      {t.source === "audius" && (
-                        <a className="src-badge" href={t.permalink ?? "https://audius.co"} target="_blank" rel="noreferrer"
-                          onClick={(e) => e.stopPropagation()} title="From Audius: open the artist's page">AUDIUS</a>
-                      )}
                     </td>
                     <td className="num mono">{t.bpm.toFixed(1)}</td>
                     <td className={`num mono key ${kd === null ? "" : kd === 0 ? "k0" : kd === 1 ? "k1" : kd === 2 ? "k2" : ""}`}>{t.camelot}</td>
                     <td className="num"><span className="ebar"><i style={{ width: `${t.energy * 100}%` }} /></span></td>
                     <td className="num mono dim">{fmtTime(t.duration).slice(0, -2)}</td>
                     <td className="dim">{t.genre}</td>
+                    <td className="num row-actions">
+                      <button className="btn tiny go" onClick={() => p.onMixIn(t.id)} title="Smoothly mix this track in right now using Jev's transition brain">
+                        MIX ▶
+                      </button>
+                      <button className="btn tiny" onClick={() => onLoad(t.id)} title="Load onto the idle deck / queue next">
+                        LOAD
+                      </button>
+                    </td>
                   </tr>
                 );
               })}

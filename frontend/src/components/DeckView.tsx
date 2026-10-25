@@ -120,6 +120,25 @@ export function DeckView({ deck, color, other, live, mixOut, mixIn, onDropTrack,
         <button className="btn tiny" disabled={!t} onClick={() => void deck.shiftGrid(nudgeMs / 1000)} title="Move beat grid 10 ms later">▶</button>
         <button className="btn tiny" disabled={!t} onClick={() => void deck.shiftGrid(deck.beatPeriod / 2)}
           title="Grid is on the offbeat: shift half a beat">½</button>
+        <span className="sep" />
+        <span className="lbl">STEM</span>
+        {(["full", "vocal", "inst"] as const).map((m) => (
+          <button
+            key={m}
+            className={`btn tiny ${(st.stem ?? "full") === m && m !== "full" ? "on" : ""}`}
+            disabled={!t}
+            onClick={() => deck.setStemMode((st.stem ?? "full") === m ? "full" : m)}
+            title={
+              m === "vocal"
+                ? "VOCAL / ACAPELLA STEM: isolate the vocal hook (-40 dB sub-bass, 320 Hz HPF) to ride over the other deck's instrumental"
+                : m === "inst"
+                ? "INSTRUMENTAL / DUB STEM: carve out the vocal pocket (-11 dB @ 1 kHz, +2 dB sub) so another song's vocal sits on top"
+                : "Restore full normal spectrum"
+            }
+          >
+            {m === "full" ? "FULL" : m === "vocal" ? "VOX" : "INST"}
+          </button>
+        ))}
         {st.loop && <span className="loop-tag mono">LOOP</span>}
       </div>
     </section>

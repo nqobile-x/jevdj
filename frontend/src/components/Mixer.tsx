@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { LockState } from "../audio/beatlock";
 import { KILL_DB, type Deck } from "../audio/deck";
+import { SOUND_PADS, type Soundboard } from "../audio/soundboard";
 import { useStore, type Store } from "../store";
 import type { TransitionStyle } from "../types";
 import { Knob } from "./Knob";
@@ -117,6 +118,8 @@ const MANUAL_STYLES: [TransitionStyle | "auto", string][] = [
   ["auto", "AUTO"], ["long_blend", "BLEND"], ["filter_fade", "FILTER"], ["quick_cut", "CUT"], ["echo_out", "ECHO"],
   ["wash_out", "WASH"], ["loop_roll", "ROLL"], ["brake", "BRAKE"],
   ["chop", "CHOP"], ["tease", "TEASE"], ["rewind", "REWIND"],
+  ["log_drum_swap", "LOG SWAP"], ["word_play", "WORDPLAY"], ["double_drop", "DBL DROP"], ["siren_spin", "SIREN"],
+  ["stem_mashup", "MASHUP"],
 ];
 
 interface Props {
@@ -129,12 +132,14 @@ interface Props {
   lock: Store<LockState>;
   canManualMix: boolean;
   onManualMix: (style: TransitionStyle | "auto") => void;
+  soundboard: Soundboard;
 }
 
-export function Mixer({ a, b, crossfader, onCrossfader, level, mixProgress, lock, canManualMix, onManualMix }: Props) {
+export function Mixer({ a, b, crossfader, onCrossfader, level, mixProgress, lock, canManualMix, onManualMix, soundboard }: Props) {
   const autoA = useAutoView(a);
   const autoB = useAutoView(b);
   const lk = useStore(lock);
+  const sb = useStore(soundboard.store);
   const [style, setStyle] = useState<TransitionStyle | "auto">("auto");
   // While automating, the ghost crossfader shows where a DJ's hand would be.
   const automating = mixProgress != null;
@@ -178,6 +183,31 @@ export function Mixer({ a, b, crossfader, onCrossfader, level, mixProgress, lock
           </select>
           <button className="btn small go" disabled={!canManualMix} onClick={() => onManualMix(style)}
             title="Mix from the playing deck into the other deck now (AUTO off)">MIX ▶</button>
+        </div>
+        <div className="soundboard-rack">
+          <div className="sb-head">
+            <span className="lbl">SOUNDBOARD & CHUNKS</span>
+            <button
+              className={`btn tiny sb-auto ${sb.autoEnabled ? "on" : ""}`}
+              onClick={() => soundboard.setAuto(!sb.autoEnabled)}
+              title="AUTO FX & SMART CHUNKS: Jev fires trending club FX & slices live vocal/beat chunks from the incoming track"
+            >
+              AUTO FX: {sb.autoEnabled ? "ON" : "OFF"}
+            </button>
+          </div>
+          <div className="sb-grid">
+            {SOUND_PADS.map((p) => (
+              <button
+                key={p.id}
+                className={`sb-pad sb-${p.color} ${p.kind === "chunk" ? "sb-chunk" : ""} ${sb.activePad === p.id ? "active" : ""}`}
+                onClick={() => soundboard.trigger(p.id, "user")}
+                title={p.tip}
+              >
+                <span className="sb-key">{p.key}</span>
+                <span className="sb-lbl">{p.short}</span>
+              </button>
+            ))}
+          </div>
         </div>
       </div>
       <Channel deck={b} color="var(--cyan)" auto={autoB} automating={automating} />
